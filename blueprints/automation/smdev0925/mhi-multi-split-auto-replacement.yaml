@@ -4,222 +4,242 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    Takes MHI's AUTO off each head and makes the heat/cool decision here
-    instead, from the room temperature against one band you set.
+    This blueprint replaces the AUTO mode of each indoor unit. It selects
+    cooling or heating from the room temperature and the setpoint of the unit.
 
 
-    It does one thing: when a head has taken its room past the far end of the
-    band, it is turned around. Nothing else is ever written, and no head is
-    ever put into a mode it was not already in one side of.
+    The setpoint is the temperature that you want. The blueprint reads the
+    setpoint from the unit. It does not write a setpoint. If you set 21 °C on
+    the unit, the blueprint controls the room to 21 °C.
 
 
-    ## Every head will change mode on its own
-
-
-    **Any head you add here will swing between heating and cooling by itself,
-    with nobody asking it to.** That is what the blueprint is for, and it is
-    worth saying plainly before you add a head to it. Left alone, a room in a
-    tight band will cool to the bottom of it, drift down, heat back up, drift,
-    and go round again — several times a day. If a room in your house should
-    never be heated, or never cooled, do not put it in this list.
-
-
-    A head bursts hard for roughly fifteen minutes after any mode change, and
-    overshoots. Widen the band before you shorten the dwell.
+    The two limits are distances from the setpoint. They are not temperatures.
+    Thus one pair of values is correct for all rooms.
 
 
     ## The rules
 
 
-    Room temperature is `T`. The band runs from **Cooling Limit** (the coldest
-    the room may get) up to **Heating Limit** (the warmest it may get). The
-    tolerance stops a head flipping while it sits on a limit.
+    `T` is the room temperature. `S` is the setpoint of the unit.
 
 
-    1. A head **in cooling** with `T` below Cooling Limit − tolerance is
-       switched to **heating**. It has taken the room past the cold end.
+    1. If a unit cools, and `T` is less than `S` minus the Cooling Limit, change
+       the unit to heating.
 
-    2. A head **in heating** with `T` above Heating Limit + tolerance is
-       switched to **cooling**. It has taken the room past the warm end.
+    2. If a unit heats, and `T` is more than `S` plus the Heating Limit, change
+       the unit to cooling.
 
-    3. Anything else is **left exactly as it is.**
-
-
-    Rule 3 is most of the time. A head that has reached its setpoint and gone
-    quiet stays in the mode it is in — that is not a state this blueprint has
-    an opinion about. Only the two limits move anything.
+    3. In all other conditions, do not change the unit.
 
 
-    Note that the rules are one-way at each end. A head already in cooling that
-    is too warm is left alone, because it is already doing the right thing. The
-    same for a head in heating that is too cold.
+    Example. The setpoint is 21 °C. Both limits are 2 °C. The unit cools. At
+    18.9 °C the blueprint changes the unit to heating. The setpoint stays at
+    21 °C. The unit heats. At 23.1 °C the blueprint changes the unit to cooling.
+    If you set the setpoint to 23 °C, the band moves with it.
 
 
-    ## What it will not touch
+    Each rule operates in one direction only. If a unit cools and the room is too
+    warm, the unit is correct. The blueprint does not change it. This is also
+    applicable to a unit that heats when the room is too cold.
 
 
-    `off`, `dry`, `auto` and `fan_only` are all ignored, every run, and nothing
-    is ever sent to a head in one of them.
+    Rule 3 applies most of the time. If a unit is at its setpoint and stops, the
+    blueprint does not change it.
 
 
-    - **`off`** — a room nobody wants conditioned. Leaving it out is the point.
-
-    - **`auto`** — this blueprint replaces AUTO, so a head still in it has a
-      second controller of its own and the two would argue. Putting a head into
-      `auto` is one way to take it out of the fleet without editing the
-      automation.
-
-    - **`fan_only`** — yours to use, and left alone in both directions: a head
-      you park in fan is never taken out of it by this blueprint, and no head is
-      ever put into it. Read the section on idle heads before you park one for
-      long: in cooling its valve is shut and it really is doing nothing, but in
-      heating its valve stays open and it quietly warms its own room.
-
-    - **`dry`** — **a known gap.** Dry is a cooling call with a setpoint the
-      unit treats differently, and folding it into rule 1 as though it were
-      cooling would send a head that was dehumidifying off to heat. Until that
-      is worked out, a head in dry is left in dry and drops out of the fleet.
-      It still holds the outdoor unit to cooling while it is there.
+    ## Warning: each unit changes its mode
 
 
-    A head that is unavailable, or that has no `current_temperature` to report,
-    is skipped for that run and nothing is guessed on its behalf.
+    Each unit in the list changes between heating and cooling without a command
+    from you. This is the function of the blueprint. If a room must not have
+    heating, or must not have cooling, do not add its unit to the list.
 
 
-    ## The reading everything depends on
+    A unit operates at high power for approximately 15 minutes after a mode
+    change. It goes past the setpoint. Increase the limits before you decrease
+    the dwell time.
 
 
-    Every decision above is taken from one number: the head's own
-    `current_temperature`. That comes from a return-air sensor in the grille at
-    the top of the unit, and **it is only as good as the air moving past it.**
+    ## Modes that the blueprint ignores
 
 
-    With the compressor satisfied and the fan idling, that sensor reads the
-    pocket of air lying against the ceiling rather than the room, and on a wall
-    unit that pocket runs warm. A head sitting quietly in cooling therefore
-    reports a room warmer than it is, which is the direction that *delays*
-    rule 1. It is a slow flip, not a wrong one — but it is why the band wants to
-    be wider than it looks like it needs to be.
+    The blueprint ignores `off`, `dry`, `auto` and `fan_only`. The mode rules do
+    not write to a unit in these modes, and they do not put a unit into them.
 
 
-    Two ways to take the guesswork out, both in the integration rather than in
-    here: set an **Indoor Offset** on the device to correct the bias, or feed a
-    real room sensor in with the integration's external temperature source
-    option, or the `mitsubishi_wf_rac.set_external_temperature` action. With a
-    room sensor in the loop, `current_temperature` is that sensor and none of
-    the above applies.
+    - **`off`** — the room does not need control.
+
+    - **`auto`** — this blueprint replaces AUTO. A unit in AUTO controls itself,
+      and the two controls disagree. To remove a unit from the group, set it to
+      AUTO. But a unit in AUTO still makes a request to the outdoor unit, and
+      the blueprint cannot see this request. Refer to the lockout data below.
+
+    - **`fan_only`** — you control this mode. The mode rules do not change it.
+      Read the data about idle units before you keep a unit in fan mode for a
+      long time. Lockout protection uses fan mode for a short time, and then it
+      puts the unit back.
+
+    - **`dry`** — this is a known limitation. Dry is a cooling request, and the
+      unit uses the setpoint differently. Thus rule 1 could change a unit that
+      removes humidity to heating. The blueprint keeps a unit in dry. Dry keeps
+      the outdoor unit in cooling. The lockout logic counts dry as a cooling
+      request that it cannot change.
 
 
-    ## What an idle head is doing on the shared circuit
+    The blueprint also ignores a unit that is unavailable, a unit that does not
+    give a room temperature, and a unit that does not give a setpoint.
 
 
-    Worth knowing before you park a head anywhere and stop thinking about it.
-    Measured on a live SCM multi-split with the per-head EEV Position sensor
+    ## Lockout protection
+
+
+    One outdoor unit supplies one mode at one time. This blueprint sets cooling
+    or heating on each indoor unit. Thus two units can request opposite modes.
+    One unit gets the compressor. The other unit is locked out: its fan
+    operates, its coil is not active, and its room temperature moves away from
+    the setpoint.
+
+
+    Set **Lockout protection** to on. The blueprint then uses the rules of the
+    *MHI multi-split mode lockout resolver*:
+
+
+    1. **All units request the same mode.** No action is necessary.
+
+    2. **The units request different modes, and one unit calls.** The unit that
+       operates the compressor keeps it. The release grace continues through the
+       compressor cycles.
+
+    3. **The units request different modes, and no unit calls.** The units on the
+       side that operated last change to fan mode for a short time. This removes
+       their demand, and the other side gets the outdoor unit. After the delay,
+       the blueprint puts these units back to their mode.
+
+
+    There are two differences from that blueprint. The blueprint sets each mode
+    here, but you set each mode there.
+
+
+    - **A Cool/Heat Status sensor is not necessary.** That sensor shows the
+      selection of the AUTO mode. No unit here is in AUTO, thus the request of a
+      unit is its mode. You do not enable an extra sensor.
+
+    - **There is no mode lock.** In the resolver, a `cool` or `heat` mode is your
+      command, and the resolver never changes it. This is why the two blueprints
+      stop each other. Here, rule 1 or rule 2 set each mode, thus a change to fan
+      mode for four minutes does not disobey a command. **Use this blueprint or
+      the resolver on a unit. Do not use both.**
+
+
+    The blueprint cannot move a unit in `dry`. Dry requests cooling, and the
+    blueprint does not write to it. Thus the cooling side cannot change to fan
+    mode while a unit is in dry. The blueprint writes this condition to the
+    logbook.
+
+
+    If lockout protection is off, the mode rules operate as above. The blueprint
+    writes a split to the logbook and does no more. Use this setting on a single
+    split system, where a lockout cannot occur.
+
+
+    ## Known limitation: an interrupted run
+
+
+    The blueprint changes a unit to fan mode and puts it back in one run, with a
+    delay between the two steps. If the run stops, the unit stays in fan mode. A
+    restart, a reload or a configuration check can stop the run. The mode rules
+    ignore fan mode, thus the blueprint cannot correct this condition. Set the
+    mode manually. The trace shows this unit as not in the group.
+
+
+    ## The temperature reading
+
+
+    The blueprint uses one value: the `current_temperature` of the unit. A sensor
+    in the air inlet at the top of the unit gives this value. **The value is
+    correct only if air moves across the sensor.** If the compressor is off and
+    the fan is slow, the sensor reads the air at the ceiling. In a wall unit,
+    this air is warmer than the room.
+
+
+    There are two methods to correct this, both in the integration:
+
+
+    - Set an **Indoor Offset** on the device.
+
+    - Give a room sensor to the integration. Use the external temperature source
+      option, or the `mitsubishi_wf_rac.set_external_temperature` action. Then
+      `current_temperature` is the value of your sensor, and this data does not
+      apply.
+
+
+    ## Idle units on a shared circuit
+
+
+    Data measured on an SCM multi-split with the EEV Position sensor of each unit
     `[observed on hardware]`:
 
 
-    - **While the system is cooling**, the expansion valves of heads that are
-      not calling — including heads in fan — sit at **0 %**. They are shut. No
-      refrigerant reaches those coils, so those heads are doing nothing to their
-      rooms and their return-air sensors are reading honestly.
+    - **When the system cools**, the expansion valve of each unit that does not
+      call is at **0 %**. This includes a unit in fan mode. The valve is closed.
+      These units do not change their rooms, and their sensors are correct.
 
-    - **While the system is heating**, the valves are held **open on every
-      head**, whether or not that head is calling. A head sitting in `fan_only`
-      measured **24 %** open with the system heating.
-
-
-    So an idle head is thermally neutral in cooling and **is not in heating.**
-    Hot gas reaches its coil either way, which means two things worth planning
-    around:
+    - **When the system heats**, the valve of each unit stays open. This is also
+      applicable to a unit that does not call. A unit in fan mode measured
+      **24 %**.
 
 
-    - **A head in fan is a low-power heater while the system is heating.** It is
-      drawing air over a coil with refrigerant in it. If you park a head in fan
-      to keep a room's air moving, expect that room to gain a little heat every
-      time some other head has the system in heating.
-
-    - **Its own reading goes up with it.** The head reports the air it has just
-      warmed, so its return-air sensor reads high. That is the same direction as
-      the ceiling-pocket bias above, and the two stack. Fan does not buy you an
-      honest reading during heating — it buys you a warm one.
+    Thus an idle unit has no thermal effect in cooling, but it has an effect in
+    heating. A unit in fan mode is a heater of low power when the system heats.
+    It moves air across a coil that contains refrigerant. It heats its room, and
+    its sensor reads this warm air.
 
 
-    Both are arguments for a generous band rather than a chase after a degree,
-    and both are why nothing here parks a head in fan on your behalf.
+    There are two results:
 
 
-    EEV Position is a diagnostic sensor, disabled by default, one per head — it
-    is genuinely per-head on a multi-split, unlike compressor frequency, current
-    or discharge temperature. Turn it on under the device if you want to watch
-    this yourself. It is relative, not calibrated: the full-open pulse count is
-    unknown and the raw byte is simply mapped onto 0–100 %.
+    - Fan mode does not give a correct temperature reading during heating. This
+      is why the blueprint does not put a unit into fan mode.
+
+    - A change to fan mode is not free. Four minutes in fan mode during heating
+      puts some heat into that room.
 
 
-    ## The setpoint it writes
+    EEV Position is a diagnostic sensor, and it is disabled by default. There is
+    one sensor for each unit. On a multi-split, this value is different for each
+    indoor unit. Compressor frequency, current and discharge temperature are not
+    different. The value is relative, and it is not calibrated.
 
 
-    These units carry **one** setpoint on the wire, shared by cooling and
-    heating. A head cooling to 21 that flips to heat would try to heat the room
-    to 21, reach it at once, and sit there having done nothing. So a flip sends
-    the setpoint and the mode in a single `climate.set_temperature` call — the
-    integration applies both together and checks the value against the mode
-    being switched *to*.
+    ## Timing
 
 
-    Keep both setpoints inside the band. A cooling setpoint below the Cooling
-    Limit tells the head to cool past the point where rule 1 turns it around,
-    and you get a machine chasing its own tail. Near the middle is a reasonable
-    place to start.
+    **Dwell** is for each unit. It starts at the last mode change of that unit.
+    A mode change also occurs when the module disconnects from the network and
+    connects again, and the module does this for approximately one minute each
+    hour. A change to fan mode also starts it. The blueprint does not change a
+    unit until the dwell time is complete. Dwell delays a change, but it cannot
+    cause a change.
 
 
-    ## Before you put this on a multi-split
+    **Settle** is for all units. A command needs time before the unit reports its
+    new state. The integration reads the module one time each minute, and a write
+    holds the module for approximately one minute. Thus the state is old for a
+    short time after a change. Settle prevents a second command against the old
+    state.
 
 
-    One outdoor unit serves one mode at a time. **This blueprint sets explicit
-    `cool` and `heat` on individual heads, so on a multi-split it can and will
-    drive two heads into opposite modes, and the one that loses is locked out
-    and drifts.** When that happens it is written to the logbook, so you can see
-    it rather than wonder about it — but resolving it is not in here.
-
-
-    It also does not combine with the *MHI multi-split mode lockout resolver*
-    on the same heads. That blueprint treats an explicit `cool` or `heat` as a
-    hard lock it must never override, and this one produces nothing else, so
-    pointing both at the same units deadlocks the pair. Use one or the other:
-    the resolver where you want to keep MHI's AUTO and just unstick it, this
-    one where you want the decision made outside the unit.
-
-
-    Where it fits without an argument: a single split, a multi-split whose
-    rooms all want the same thing at the same time, or one head of a multi-split
-    with the rest left in `off`, `fan_only` or `auto`.
-
-
-    ## Two things to know about the timing
-
-
-    **Dwell** is per head, and is measured from the last time that head's mode
-    changed — which also happens when the unit drops off the network and comes
-    back, which it does for about a minute every hour. After one of those the
-    head is held at its current mode until the dwell has passed again. That
-    delays a change; it never causes one.
-
-
-    **Settle** is fleet-wide, and covers the gap between sending a command and
-    the unit admitting to it. The module is polled once a minute and a write
-    holds a lease of about the same, so for a short while after a change the
-    state still reads as it was. Settle stops a second, identical command being
-    sent against that stale reading. Everything that needed doing was done in
-    the same run, so nothing is waiting on it.
+    One run does one task. If a unit needs a mode change, the blueprint makes the
+    change. The lockout check then waits for the next run, when the new modes are
+    in the state.
   domain: automation
   input:
     fleet:
-      name: The heads
+      name: The units
       icon: mdi:hvac
       description: >-
-        Every indoor unit whose mode this automation may turn around. A head in
-        `off`, `dry`, `auto` or `fan_only` is ignored while it is there, so you
-        can list it here and still park it out of the way.
+        Each indoor unit that the blueprint can change. The blueprint ignores a
+        unit in `off`, `dry`, `auto` or `fan_only`.
       input:
         climate_entities:
           name: Climate entities
@@ -229,92 +249,125 @@ blueprint:
               filter:
                 - integration: mitsubishi_wf_rac
                   domain: climate
-    band:
-      name: The band
+    limits:
+      name: The limits
       icon: mdi:thermometer-lines
       description: >-
-        The two limits every head is held between. One band covers the whole
-        list — for rooms that need different bands, make a second automation
-        from this blueprint.
+        Both values are distances from the setpoint of the unit, in degrees.
+        They are not temperatures. Together they make the band of each unit.
       input:
         cool_limit:
           name: Cooling Limit Threshold
           description: >-
-            The coldest the room may get. A head that is cooling and has taken
-            the room below this, less the tolerance, is switched to heating.
-          default: 20
+            The distance **below** the setpoint. If the room goes below this
+            point, the blueprint changes a unit that cools to heating. With a
+            setpoint of 21 and a value of 2, the unit changes at 19.
+          default: 2
           selector:
             number:
-              min: 10
-              max: 30
+              min: 0.5
+              max: 10
               step: 0.5
               unit_of_measurement: "°C"
               mode: box
         heat_limit:
           name: Heating Limit Threshold
           description: >-
-            The warmest the room may get. A head that is heating and has taken
-            the room above this, plus the tolerance, is switched to cooling.
-          default: 24
+            The distance **above** the setpoint. If the room goes above this
+            point, the blueprint changes a unit that heats to cooling. With a
+            setpoint of 21 and a value of 2, the unit changes at 23.
+          default: 2
           selector:
             number:
-              min: 12
-              max: 33
+              min: 0.5
+              max: 10
               step: 0.5
               unit_of_measurement: "°C"
               mode: box
-        hysteresis:
-          name: Tolerance at each limit
-          description: >-
-            How far past a limit the room has to go before the head is turned
-            around. Without it a room resting on a limit flips on sensor noise.
-            0.5 °C is the resolution the setpoint itself has.
-          default: 0.5
-          selector:
-            number:
-              min: 0
-              max: 3
-              step: 0.1
-              unit_of_measurement: "°C"
-              mode: box
-    setpoints:
-      name: Setpoints written on a flip
-      icon: mdi:target
+    lockout:
+      name: Lockout protection
+      icon: mdi:lock-open-alert
       description: >-
-        Sent with the mode, in one call, whenever a head is turned around. Both
-        belong inside the band — see the header.
+        For a multi-split system, where two units that request opposite modes
+        cause a lockout. Set this to off on a single split system.
       input:
-        cool_setpoint:
-          name: Setpoint for cooling
-          default: 22
+        lockout_protection:
+          name: Resolve lockouts
+          description: >-
+            Off: the blueprint writes a split to the logbook and does no more.
+            On: the units on the side that operated last change to fan mode for
+            a short time. The other side then gets the outdoor unit. The
+            blueprint then puts these units back.
+          default: false
+          selector:
+            boolean:
+        demand_sensors:
+          name: Compressor Demand sensors
+          description: >-
+            Necessary only when the protection is on. Select one sensor for each
+            unit. These sensors are enabled by default. The blueprint matches
+            them to the climate entities by device, thus the sequence is not
+            important. If a unit has no sensor, the blueprint cannot know if that
+            unit operated last. It then makes no change.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - integration: mitsubishi_wf_rac
+                  domain: binary_sensor
+        release_grace_minutes:
+          name: Release grace
+          description: >-
+            The time that a unit continues to count as in use after its
+            compressor demand stops. The demand stops between the compressor
+            cycles. Without this time, a unit that is not complete reads as
+            complete, and it loses the outdoor unit.
+          default: 10
+          selector:
+            number:
+              min: 2
+              max: 60
+              unit_of_measurement: minutes
+              mode: box
+        cooldown_minutes:
+          name: Cooldown between changes to fan mode
+          description: >-
+            Keep this time more than the settle time of the unit after a mode
+            change, which is approximately 15 minutes. The time starts at the
+            last action of this blueprint, and a mode change is an action.
+          default: 20
           selector:
             number:
               min: 18
-              max: 30
-              step: 0.5
-              unit_of_measurement: "°C"
+              max: 120
+              unit_of_measurement: minutes
               mode: box
-        heat_setpoint:
-          name: Setpoint for heating
-          default: 22
+        relax_delay:
+          name: Time in fan mode
+          description: >-
+            The time that the units stay in fan mode. This time must be more
+            than the time for the outdoor unit to release and for the other side
+            to start to call. Four minutes is correct on a four-unit SCM80.
+            Increase this time. Do not decrease it.
+          default:
+            hours: 0
+            minutes: 4
+            seconds: 0
           selector:
-            number:
-              min: 18
-              max: 30
-              step: 0.5
-              unit_of_measurement: "°C"
-              mode: box
+            duration:
     timing:
       name: Timing
       icon: mdi:timer-outline
       collapsed: true
       input:
         dwell_minutes:
-          name: Dwell before a head may change again
+          name: Dwell before the next change of a unit
           description: >-
-            Per head. Keep it longer than the unit's post-mode-change burst of
-            roughly fifteen minutes, or each change starts answering the
-            overshoot from the last one.
+            For each unit. Keep this time more than the high-power time of the
+            unit after a mode change, which is approximately 15 minutes. If the
+            time is less, each change is a result of the temperature overshoot
+            from the last change.
           default: 20
           selector:
             number:
@@ -323,11 +376,10 @@ blueprint:
               unit_of_measurement: minutes
               mode: box
         settle_minutes:
-          name: Settle after any change
+          name: Settle after a change
           description: >-
-            Fleet-wide. How long to leave the units alone after a round of
-            changes, so the next run reads what they actually did rather than
-            what they had not caught up with yet.
+            For all units. The time to make no change after a run. The next run
+            then reads the new state of the units, and not the old state.
           default: 5
           selector:
             number:
@@ -343,10 +395,10 @@ trace:
   stored_traces: 25
 
 triggers:
-  # Five minutes, not one. A command takes a write lease of about a minute and
-  # the module is polled once a minute, so a tighter loop reads back the state
-  # a head has not caught up with yet. Nothing here needs to be quicker: the
-  # dwell is measured in tens of minutes.
+  # Five minutes, and not one minute. A command holds the module for
+  # approximately one minute, and the integration reads the module one time each
+  # minute. A shorter interval thus reads the old state. A longer interval is
+  # sufficient, because the dwell time is tens of minutes.
   - trigger: time_pattern
     minutes: "/5"
 
@@ -354,48 +406,59 @@ variables:
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
   heat_limit: !input heat_limit
-  hysteresis: !input hysteresis
-  cool_setpoint: !input cool_setpoint
-  heat_setpoint: !input heat_setpoint
+  lockout_protection: !input lockout_protection
+  demand_sensors: !input demand_sensors
+  release_grace_minutes: !input release_grace_minutes
+  cooldown_minutes: !input cooldown_minutes
+  relax_delay: !input relax_delay
   dwell_minutes: !input dwell_minutes
   settle_minutes: !input settle_minutes
 
-  # There has to be room between the two limits, or a head turned around at one
-  # end arrives already past the other and is turned straight back. Reported in
-  # the actions rather than dropped as a condition, so a band entered the wrong
-  # way round says so instead of doing nothing for ever.
-  band_valid: "{{ cool_limit + 2 * hysteresis < heat_limit }}"
-
-  # One row per head that is participating: on, reachable, reporting a room
-  # temperature, and in cool or heat. off / dry / auto / fan_only are the
-  # opt-outs and never appear here.
-  #   want   = the mode the rules ask for; equal to mode unless a limit was passed
-  #   change = want differs from mode, and the head has served its dwell
-  #   after  = the mode this head will be in once this run is done
+  # One row for each unit in the group: on, available, in cool or heat, and with
+  # a room temperature and a setpoint. The modes off, dry, auto and fan_only are
+  # not in this list.
+  #   want    = the mode from the rules; equal to mode if no limit was passed
+  #   change  = want is different from mode, and the dwell time is complete
+  #   calling = the compressor operates for this unit, plus the release grace
+  #   since   = minutes from the last change of its demand; the minimum value is
+  #             the unit that operated last
+  # Both limits are distances from the setpoint of that unit. Thus each room has
+  # its own band, and the blueprint writes no setpoint.
   fleet: >-
     {% set ns = namespace(items=[]) %}
     {% for c in climate_entities %}
       {% set s = states[c] %}
       {% set mode = s.state if s is not none else 'unknown' %}
       {% set temp = state_attr(c, 'current_temperature') %}
-      {% if mode in ['cool', 'heat'] and temp is number %}
-        {# One-way at each end: a cooling head that is too warm is already doing
-           the right thing, and so is a heating head that is too cold. #}
-        {% set want = 'heat' if mode == 'cool' and temp < cool_limit - hysteresis
-                 else 'cool' if mode == 'heat' and temp > heat_limit + hysteresis
+      {% set target = state_attr(c, 'temperature') %}
+      {% if mode in ['cool', 'heat'] and temp is number and target is number %}
+        {# Each rule operates in one direction. A unit that cools in a warm room
+           is correct, and so is a unit that heats in a cold room. #}
+        {% set want = 'heat' if mode == 'cool' and temp < target - cool_limit
+                 else 'cool' if mode == 'heat' and temp > target + heat_limit
                  else mode %}
         {% set dwell = (now() - s.last_changed).total_seconds() / 60 %}
-        {% set change = want != mode and dwell >= dwell_minutes %}
+        {% set dev = device_id(c) %}
+        {# The filter 'first' gives Undefined for an empty list, and Undefined is
+           not none. Thus the index is explicit here. #}
+        {% set matched = [] if dev is none
+                         else demand_sensors | select('in', device_entities(dev)) | list %}
+        {% set demand = matched[0] if matched | count > 0 else none %}
+        {% set d = states[demand] if demand is not none else none %}
+        {% set since = 99999 if d is none
+                       else ((now() - d.last_changed).total_seconds() / 60) %}
         {% set ns.items = ns.items + [{
              'entity': c,
              'mode': mode,
              'want': want,
-             'change': change,
-             'held': want != mode and not change,
-             'after': want if change else mode,
-             'setpoint': cool_setpoint if want == 'cool' else heat_setpoint,
+             'change': want != mode and dwell >= dwell_minutes,
+             'held': want != mode and dwell < dwell_minutes,
+             'calling': d is not none and (d.state == 'on'
+                        or (d.state == 'off' and since < release_grace_minutes)),
+             'since': since | round(1),
+             'after': want if (want != mode and dwell >= dwell_minutes) else mode,
              'temp': temp,
-             'target': state_attr(c, 'temperature'),
+             'target': target,
              'dwell': dwell | round(1) }] %}
       {% endif %}
     {% endfor %}
@@ -404,98 +467,209 @@ variables:
   changes: "{{ fleet | selectattr('change') | list }}"
   held: "{{ fleet | selectattr('held') | list }}"
 
-  # Where the fleet ends up once this run has written everything. On a
-  # multi-split both camps occupied is a lockout - see the header.
-  split: >-
-    {{ fleet | selectattr('after', 'eq', 'cool') | list | count > 0
-       and fleet | selectattr('after', 'eq', 'heat') | list | count > 0 }}
+  # The modes of the units after this run writes all changes. Dry counts as the
+  # cooling request that it is.
+  after_cooling: >-
+    {{ (fleet | selectattr('after', 'eq', 'cool') | map(attribute='entity') | list)
+       + dry_heads }}
+  after_heating: >-
+    {{ fleet | selectattr('after', 'eq', 'heat') | map(attribute='entity') | list }}
+  after_split: >-
+    {{ after_cooling | count > 0 and after_heating | count > 0 }}
+
+  # --- lockout ---------------------------------------------------------------
+  # The mode of a unit is its request. No unit is in AUTO, thus there is no
+  # selection to read from a Cool/Heat Status sensor. Dry is a cooling request
+  # that the blueprint cannot change, because it does not write to dry.
+  dry_heads: >-
+    {% set ns = namespace(items=[]) %}
+    {% for c in climate_entities if states(c) == 'dry' %}
+      {% set ns.items = ns.items + [c] %}
+    {% endfor %}
+    {{ ns.items }}
+
+  cooling_votes: >-
+    {{ (fleet | selectattr('mode', 'eq', 'cool') | map(attribute='entity') | list)
+       + dry_heads }}
+  heating_votes: >-
+    {{ fleet | selectattr('mode', 'eq', 'heat') | map(attribute='entity') | list }}
+
+  # A lockout occurs only when both sides have units.
+  conflict: >-
+    {{ cooling_votes | count > 0 and heating_votes | count > 0 }}
+
+  # A unit that operates keeps the outdoor unit.
+  in_use: "{{ fleet | selectattr('calling') | list }}"
+
+  # The side that operated last. The unit with the most recent change of demand
+  # shows the last mode of the compressor. The blueprint reads this value only
+  # when all units are quiet, which is the only time that it is correct.
+  last_served: >-
+    {% set ns = namespace(t=99999, mode='none') %}
+    {% for f in fleet %}
+      {% if f.since < ns.t %}
+        {% set ns.t = f.since %}
+        {% set ns.mode = f.mode %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.mode }}
+
+  waiting_side: >-
+    {{ 'heat' if last_served == 'cool'
+       else 'cool' if last_served == 'heat' else 'none' }}
+
+  # The units that change to fan mode: all units on the side that operated last.
+  # Fan mode removes the demand that holds the outdoor unit.
+  standdown: "{{ fleet | selectattr('mode', 'eq', last_served) | list }}"
+
+  # Dry requests cooling, and the blueprint does not write to it. Thus dry holds
+  # the cooling side.
+  blocked_by_dry: "{{ last_served == 'cool' and dry_heads | count > 0 }}"
+
+  cooldown_passed: >-
+    {% set lt = this.attributes.get('last_triggered') %}
+    {{ lt is none or (now() - lt).total_seconds() >= cooldown_minutes * 60 }}
+
+  # All conditions for a change to fan mode, but not the dry block. The actions
+  # examine the dry block, so that the blueprint reports it.
+  lockout_ready: >-
+    {{ lockout_protection and conflict and in_use | count == 0
+       and last_served in ['cool', 'heat'] and standdown | count > 0
+       and cooldown_passed }}
 
 conditions:
-  # Nothing to do is the normal outcome. Stop here rather than write a logbook
-  # line every five minutes.
+  # No action is the usual result. Stop here, and do not write a logbook entry
+  # each five minutes.
   - condition: template
-    value_template: "{{ changes | count > 0 or not band_valid }}"
+    value_template: "{{ changes | count > 0 or lockout_ready }}"
 
-  # Leave the units alone long enough after a round for their state to catch up
-  # with it. last_triggered is stamped when the actions start, so this measures
-  # from the last run that actually changed something.
+  # Give the units sufficient time to report their new state. Home Assistant
+  # sets last_triggered when the actions start, thus this time starts at the
+  # last run that made a change.
   - condition: template
     value_template: >-
       {% set lt = this.attributes.get('last_triggered') %}
       {{ lt is none or (now() - lt).total_seconds() >= settle_minutes * 60 }}
 
 actions:
+  # One run does one task. A mode change is first. The lockout check then waits
+  # for the next run, when the new modes are in the state.
   - choose:
-      - alias: The band is too tight, or the wrong way round
+      - alias: Change the units that passed a limit
         conditions:
           - condition: template
-            value_template: "{{ not band_valid }}"
+            value_template: "{{ changes | count > 0 }}"
         sequence:
-          - action: logbook.log
+          - alias: Write the changes and their data to the logbook
+            action: logbook.log
             data:
               name: MHI AUTO Replacement
               message: >-
-                Nothing done — the band is unusable. Cooling Limit
-                ({{ cool_limit }}°C) has to sit more than
-                {{ 2 * hysteresis }}°C below Heating Limit ({{ heat_limit }}°C),
-                or a head turned around at one end arrives already past the
-                other and is turned straight back.
+                Limits −{{ cool_limit }}/+{{ heat_limit }}°C from the setpoint.
+                {% for f in changes %}{{ f.entity | replace('climate.', '') }}:
+                {{ f.mode }} to {{ f.want }}
+                (room {{ f.temp }}°C, setpoint {{ f.target }}°C){{ ", " if not loop.last }}{% endfor %}.
+                {%- if held | count > 0 %}
+                No change to {% for f in held %}{{ f.entity | replace('climate.', '') }}
+                ({{ f.want }} necessary, dwell {{ f.dwell }}m of
+                {{ dwell_minutes }}m){{ ", " if not loop.last }}{% endfor %}.
+                {%- endif %}
 
-    default:
-      - alias: Say what is changing, and on what evidence
-        action: logbook.log
-        data:
-          name: MHI AUTO Replacement
-          message: >-
-            Band {{ cool_limit }}–{{ heat_limit }}°C ±{{ hysteresis }}.
-            {% for f in changes %}{{ f.entity | replace('climate.', '') }}
-            {{ f.mode }} → {{ f.want }}
-            ({{ f.temp }}°C, setpoint {{ f.target }}°C, writing
-            {{ f.setpoint }}°C){{ ", " if not loop.last }}{% endfor %}.
-            {%- if held | count > 0 %}
-            Holding {% for f in held %}{{ f.entity | replace('climate.', '') }}
-            in {{ f.mode }} ({{ f.want }} wanted, {{ f.dwell }}m of
-            {{ dwell_minutes }}m dwell){{ ", " if not loop.last }}{% endfor %}.
-            {%- endif %}
+          - repeat:
+              for_each: "{{ changes }}"
+              sequence:
+                # Read the state again. The blueprint read it at the start of the
+                # run. If the unit changed after that time - manually, from the
+                # app, or from the remote control - that change is more recent
+                # than this one. Each command also holds the module for
+                # approximately one minute.
+                - if:
+                    - condition: template
+                      value_template: "{{ states(repeat.item.entity) == repeat.item.mode }}"
+                  then:
+                    # The mode only. The setpoint is yours, and it does not
+                    # change. Thus the unit controls to the same temperature
+                    # from the other direction.
+                    - action: climate.set_hvac_mode
+                      target:
+                        entity_id: "{{ repeat.item.entity }}"
+                      data:
+                        hvac_mode: "{{ repeat.item.want }}"
 
-      - alias: Turn each one around, mode and setpoint together
-        repeat:
-          for_each: "{{ changes }}"
-          sequence:
-            # The state is re-read here because it was sampled at the top of the
-            # run. If the head has moved since - by hand, from the app, or from
-            # the remote - that is a decision newer than this one, and every
-            # command costs the unit a lease of about a minute. Leave it be.
-            - if:
-                - condition: template
-                  value_template: "{{ states(repeat.item.entity) == repeat.item.mode }}"
-              then:
-                # One call, both values. The unit carries a single setpoint
-                # shared between cooling and heating, and naming the mode here
-                # is what has the integration check the value against the mode
-                # being switched to rather than the one being left.
-                - action: climate.set_temperature
-                  target:
-                    entity_id: "{{ repeat.item.entity }}"
-                  data:
-                    hvac_mode: "{{ repeat.item.want }}"
-                    temperature: "{{ repeat.item.setpoint }}"
+          - alias: If the protection is off, report a split and make no change
+            if:
+              - condition: template
+                value_template: "{{ not lockout_protection and after_split }}"
+            then:
+              - action: logbook.log
+                data:
+                  name: MHI AUTO Replacement
+                  message: >-
+                    The units request opposite modes. One outdoor unit supplies
+                    one mode, thus one unit is locked out and its room
+                    temperature moves away from the setpoint. Set Lockout
+                    protection to on, or remove a unit from the group.
 
-      - alias: Note a fleet driven into opposite modes
-        if:
+      - alias: Resolve a lockout
+        conditions:
           - condition: template
-            value_template: "{{ split }}"
-        then:
-          - action: logbook.log
-            data:
-              name: MHI AUTO Replacement
-              message: >-
-                Heads now in opposite modes —
-                cooling: {{ fleet | selectattr('after', 'eq', 'cool')
-                   | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }};
-                heating: {{ fleet | selectattr('after', 'eq', 'heat')
-                   | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}.
-                On one outdoor unit only one side can run; the other is locked
-                out and its room will drift. Resolving that is not this
-                automation's job — widen the band, or take a head out of the
-                fleet by putting it in auto, fan or off.
+            value_template: "{{ lockout_ready }}"
+        sequence:
+          - choose:
+              - alias: Dry holds the cooling side
+                conditions:
+                  - condition: template
+                    value_template: "{{ blocked_by_dry }}"
+                sequence:
+                  - action: logbook.log
+                    data:
+                      name: MHI AUTO Replacement
+                      message: >-
+                        Dry holds the outdoor unit. Heating cannot get it,
+                        because
+                        {{ dry_heads | map('replace', 'climate.', '') | join(', ') }}
+                        {{ 'is' if dry_heads | count == 1 else 'are' }} in dry.
+                        Dry requests cooling, and this blueprint does not write
+                        to it. Change it out of dry to release the outdoor unit.
+
+            default:
+              - alias: Write the action and the unit data to the logbook
+                action: logbook.log
+                data:
+                  name: MHI AUTO Replacement
+                  message: >-
+                    The {{ last_served }} side operated last. Change
+                    {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
+                    to fan mode for {{ relax_delay }}. The {{ waiting_side }}
+                    side can then operate.
+                    Units: {% for f in fleet %}{{ f.entity | replace('climate.', '') }}
+                    [{{ f.mode }} call={{ 'Y' if f.calling else 'N' }}
+                    quiet={{ f.since }}m {{ f.temp }}/{{ f.target }}C]{{ ", " if not loop.last }}{% endfor %}
+
+              - alias: Change that side to fan mode to remove its demand
+                action: climate.set_hvac_mode
+                target:
+                  entity_id: "{{ standdown | map(attribute='entity') | list }}"
+                data:
+                  hvac_mode: fan_only
+
+              - alias: Wait for the outdoor unit to change side
+                delay: "{{ relax_delay }}"
+
+              - alias: Put each unit back to its mode
+                repeat:
+                  for_each: "{{ standdown }}"
+                  sequence:
+                    # Write only if the unit is still in fan mode. If you changed
+                    # the mode during the delay, your mode stays. A command that
+                    # makes no change also holds the module for approximately one
+                    # minute.
+                    - if:
+                        - condition: template
+                          value_template: "{{ states(repeat.item.entity) == 'fan_only' }}"
+                      then:
+                        - action: climate.set_hvac_mode
+                          target:
+                            entity_id: "{{ repeat.item.entity }}"
+                          data:
+                            hvac_mode: "{{ repeat.item.mode }}"

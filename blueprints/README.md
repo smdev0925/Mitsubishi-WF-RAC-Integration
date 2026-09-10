@@ -16,17 +16,19 @@ who use them on their own systems.
   ([discussion](https://github.com/blues-sechseck/Mitsubishi-WF-RAC-Integration/discussions/328))
 
 - **[MHI multi-split AUTO replacement](automation/smdev0925/mhi-multi-split-auto-replacement.yaml)**
-  by [smdev0925](https://github.com/smdev0925) — takes MHI's AUTO off each head
-  and makes the heat/cool decision outside the unit, from the room temperature
-  against one band. A head that is cooling and has taken its room below the
-  Cooling Limit is turned around to heating; a head that is heating and has gone
-  above the Heating Limit is turned around to cooling. Everything else is left
-  exactly as it is — it never parks a head anywhere, and `off`, `dry`, `auto`
-  and `fan_only` are all ignored in both directions. Dry is a known gap. Heads
-  added to it will swing between heating and cooling on their own, and on a
-  multi-split it can drive two heads into opposite modes, so read its header
-  before pointing it at one. Does not combine with the lockout resolver above on
-  the same heads. **Not yet proven on hardware.**
+  by [smdev0925](https://github.com/smdev0925) — replaces the AUTO mode of each
+  indoor unit. It selects cooling or heating from the room temperature and the
+  setpoint of the unit. The setpoint is the temperature that you want: the
+  blueprint reads it from the unit and never writes one. The two limits are
+  distances from that setpoint, not temperatures, thus one pair of values is
+  correct for all rooms. If a unit cools and the room goes below the setpoint
+  minus the Cooling Limit, the unit changes to heating. If a unit heats and the
+  room goes above the setpoint plus the Heating Limit, the unit changes to
+  cooling. In all other conditions it makes no change. It ignores `off`, `dry`,
+  `auto` and `fan_only`; dry is a known limitation. Optional lockout protection
+  uses the rules of the resolver above, but it needs no Cool/Heat Status sensor,
+  because the mode of a unit is its request. **Use this blueprint or the resolver
+  on a unit. Do not use both. Not yet tested on hardware.**
 
 ## Why they live here and not in the integration
 
