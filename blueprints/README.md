@@ -15,6 +15,19 @@ who use them on their own systems.
   is its Compressor Demand. Running on a four-head SCM80.
   ([discussion](https://github.com/blues-sechseck/Mitsubishi-WF-RAC-Integration/discussions/328))
 
+- **[MHI multi-split AUTO replacement](automation/smdev0925/mhi-multi-split-auto-replacement.yaml)**
+  by [smdev0925](https://github.com/smdev0925) — takes MHI's AUTO off each head
+  and makes the heat/cool decision outside the unit, from the room temperature
+  against one band. A head that is cooling and has taken its room below the
+  Cooling Limit is turned around to heating; a head that is heating and has gone
+  above the Heating Limit is turned around to cooling. Everything else is left
+  exactly as it is — it never parks a head anywhere, and `off`, `dry`, `auto`
+  and `fan_only` are all ignored in both directions. Dry is a known gap. Heads
+  added to it will swing between heating and cooling on their own, and on a
+  multi-split it can drive two heads into opposite modes, so read its header
+  before pointing it at one. Does not combine with the lockout resolver above on
+  the same heads. **Not yet proven on hardware.**
+
 ## Why they live here and not in the integration
 
 The integration reports what a unit says and sends what you ask it to. It does
