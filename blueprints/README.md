@@ -27,9 +27,12 @@ who use them on their own systems.
   limitation. Optional lockout protection resolves the split this creates on a
   multi-split, using the rules of the resolver above but without needing a
   Cool/Heat Status sensor, because no unit is in AUTO and a unit's mode is its
-  request. A debug switch writes every decision, and the reason for it, to the
-  logbook. **Use this blueprint or the resolver on a unit, never both — they
-  deadlock each other.** Lockout protection is proven on a four-head SCM80: the
+  request. A second option deals with the indoor expansion valves staying open
+  while the outdoor unit heats: a unit parked in cooling is moved to heating so
+  it settles, closes its louvres and stops its fan, rather than blowing warm air
+  into a room that did not ask for it. A debug switch writes every decision, and
+  the reason for it, to the logbook. **Use this blueprint or the resolver on a
+  unit, never both — they deadlock each other.** Lockout protection is proven on a four-head SCM80: the
   stand-down, the two-minute fan time, the restore and the handover all complete.
   The mode-change rules have not yet been seen to fire on hardware.
 
