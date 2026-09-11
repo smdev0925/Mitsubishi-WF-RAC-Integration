@@ -545,16 +545,93 @@ variables:
        and last_served in ['cool', 'heat'] and standdown | count > 0
        and cooldown_passed }}
 
+  # --- what the trace shows ---------------------------------------------------
+  # These two change nothing. They exist so that a run which stops at the
+  # conditions still says why. Open the trace, select the trigger step, and read
+  # `decision` in Changed Variables. `report` is the evidence behind it.
+  # Defined last, because they use almost everything above.
+  report: >-
+    {%- set ns = namespace(lines=[], ignored=[]) -%}
+    {%- set participating = fleet | map(attribute='entity') | list -%}
+    {%- for c in climate_entities if c not in participating -%}
+      {%- set ns.ignored = ns.ignored + [(c | replace('climate.', '')) ~ '(' ~ states(c) ~ ')'] -%}
+    {%- endfor -%}
+    {%- for f in fleet -%}
+      {%- set flag = ' CHANGE->' ~ f.want if f.change
+                else ' HELD ' ~ f.dwell ~ '/' ~ dwell_minutes ~ 'm' if f.held
+                else '' -%}
+      {%- set ns.lines = ns.lines + [
+           (f.entity | replace('climate.', '')) ~ ' ' ~ f.mode
+           ~ ' room ' ~ f.temp ~ ' set ' ~ f.target
+           ~ ' (turns at ' ~ (f.target - cool_limit if f.mode == 'cool' else f.target + heat_limit) ~ ')'
+           ~ ' call=' ~ ('Y' if f.calling else 'N')
+           ~ ' quiet=' ~ f.since ~ 'm' ~ flag] -%}
+    {%- endfor -%}
+    {{ ns.lines | join(' | ') }}
+    {{- '  DRY: ' ~ (dry_heads | map('replace', 'climate.', '') | join(', '))
+       if dry_heads | count > 0 else '' }}
+    {{- '  IGNORED: ' ~ (ns.ignored | join(', ')) if ns.ignored | count > 0 else '' }}
+
+  decision: >-
+    {%- set lt = this.attributes.get('last_triggered') -%}
+    {%- set left = 0 if lt is none
+              else (cooldown_minutes - (now() - lt).total_seconds() / 60) | round(1) -%}
+    {%- set short = held | map(attribute='entity') | map('replace', 'climate.', '') | list -%}
+    {%- set hold = '  (also holding ' ~ (short | join(', ')) ~ ' on dwell)'
+                   if held | count > 0 else '' -%}
+    {%- if changes | count > 0 -%}
+      ACT mode change:
+      {%- for f in changes %} {{ f.entity | replace('climate.', '') }}
+      {{- ' ' ~ f.mode }}->{{ f.want }}{{ ',' if not loop.last }}{% endfor %}
+    {%- elif lockout_ready and blocked_by_dry -%}
+      HELD lockout blocked by dry:
+      {{ dry_heads | map('replace', 'climate.', '') | join(', ') }}
+      votes cooling and is never written to{{ hold }}
+    {%- elif lockout_ready -%}
+      ACT lockout: stand down
+      {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
+      so {{ waiting_side }} can run{{ hold }}
+    {%- elif fleet | count == 0 -%}
+      IDLE no unit is in cool or heat with both a room temperature and a setpoint
+    {%- elif held | count > 0 and not conflict -%}
+      IDLE {{ short | join(', ') }} {{ 'has' if held | count == 1 else 'have' }}
+      passed a limit but {{ 'is' if held | count == 1 else 'are' }} still inside
+      the {{ dwell_minutes }}m dwell. No lockout.
+    {%- elif not conflict -%}
+      IDLE no unit has passed its limit, and every unit requests the same mode
+      ({{ 'cooling' if cooling_votes | count > 0 else 'heating' }})
+    {%- elif not lockout_protection -%}
+      IDLE units request opposite modes, but Lockout protection is off{{ hold }}
+    {%- elif in_use | count > 0 -%}
+      IDLE lockout, but
+      {{ in_use | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
+      still {{ 'counts' if in_use | count == 1 else 'count' }} as in use
+      (release grace {{ release_grace_minutes }}m){{ hold }}
+    {%- elif last_served == 'none' -%}
+      IDLE lockout, but no Compressor Demand sensor matched any unit, so the side
+      that operated last is unknown. Check the sensors are selected and on the
+      same device as their climate entity.{{ hold }}
+    {%- elif standdown | count == 0 -%}
+      IDLE lockout, but there is nothing to stand down{{ hold }}
+    {%- elif not cooldown_passed -%}
+      IDLE lockout, but the cooldown has {{ left }}m of
+      {{ cooldown_minutes }}m left{{ hold }}
+    {%- else -%}
+      IDLE lockout, reason not classified{{ hold }}
+    {%- endif -%}
+
 conditions:
   # No action is the usual result. Stop here, and do not write a logbook entry
-  # each five minutes.
-  - condition: template
+  # each five minutes. When this is false, `decision` in the trace says why.
+  - alias: Is there anything to do? (read `decision` in the trace)
+    condition: template
     value_template: "{{ changes | count > 0 or lockout_ready }}"
 
   # Give the units sufficient time to report their new state. Home Assistant
   # sets last_triggered when the actions start, thus this time starts at the
   # last run that made a change.
-  - condition: template
+  - alias: Has the settle time passed since the last run that did something?
+    condition: template
     value_template: >-
       {% set lt = this.attributes.get('last_triggered') %}
       {{ lt is none or (now() - lt).total_seconds() >= settle_minutes * 60 }}
