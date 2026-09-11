@@ -2,6 +2,43 @@
 # None of this is in the blueprint description, which is kept short because it
 # is a setup form rather than a document.
 #
+# WHAT THE DESCRIPTION NO LONGER SAYS
+# The description is a setup form, so the following moved here. Each option's
+# own input description still covers its basics next to the control itself.
+#
+# Lockout protection. One outdoor unit gives one mode at a time, so two units
+# asking for opposite modes means one is locked out and its room drifts. With the
+# option on, the units on the side that ran last go to fan mode briefly; that
+# releases the outdoor unit, the waiting side takes it, and they are put back. It
+# needs the Compressor Demand sensors. Leave it off on a single split. A unit in
+# dry is the one thing it cannot move: dry votes cooling and is never written to.
+#
+# Idle units in heating. While the outdoor unit heats, every indoor valve stays
+# open, so a unit parked in cooling draws air over a warm coil. The option moves
+# a unit that has nothing left to do - room at or below its setpoint - into
+# heating, where it settles, closes its louvres and stops its fan. A room above
+# its setpoint still wants cooling and is left alone, keeping its claim.
+#
+# Changing a mode yourself. A change between cooling and heating, from anywhere,
+# triggers the automation directly rather than waiting for the five-minute check,
+# and skips the settle time when nothing holds the compressor. A unit that is
+# running keeps it; the change waits its turn.
+#
+# Recovery. If a stand-down cannot finish - the unit drops off the network, or
+# Home Assistant restarts - the unit stays in fan mode and the mode rules ignore
+# it. The option puts it back into the mode the compressor is running in, and
+# retries every run. While it is on, fan mode is no longer a way to park a unit:
+# use off or auto.
+#
+# The temperature reading. Each unit measures the room from a sensor in its air
+# inlet, and that reading is only as good as the air moving past it. An Indoor
+# Offset on the device, or a separate room sensor given to the integration,
+# corrects it.
+#
+# Debug. One logbook entry per run with the decision and the readings behind it.
+# It changes no behaviour and needs no helper. About 288 entries a day, more now
+# that a mode change also triggers a run.
+#
 # WHY THE LIMITS ARE DISTANCES, NOT TEMPERATURES
 # These units carry one setpoint on the wire, shared by cooling and heating. A
 # unit cooling to 21 that changed to heating would try to heat the room to 21,
@@ -63,18 +100,18 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.9.2** — 12 September 2026
+    **Version 0.9.3** — 12 September 2026
 
 
     Replaces the AUTO mode of your indoor units. It chooses cooling or heating
-    from the room temperature and the setpoint that is already on the unit.
+    from the room temperature and the setpoint already on the unit.
 
 
     The setpoint is the temperature you want. The blueprint reads it and never
-    changes it. Set 21 °C on a unit and it works to 21 °C.
+    changes it.
 
 
-    ## What it does
+    ## The rules
 
 
     The two limits are distances from the setpoint, not temperatures. With a
@@ -82,127 +119,30 @@ blueprint:
     23 °C:
 
 
-    - It is cooling, the room falls to 19 °C, and it changes to heating.
+    - Cooling, and the room falls to 19 °C — it changes to heating.
 
-    - It is heating, the room rises to 23 °C, and it changes to cooling.
+    - Heating, and the room rises to 23 °C — it changes to cooling.
 
-    - In all other conditions it makes no change.
-
-
-    Move the setpoint and the band moves with it. Thus one pair of limits suits
-    every room, whatever each one is set to.
+    - Anything else — no change.
 
 
-    ## Read this before you use it
+    Move the setpoint and the band moves with it, so one pair of limits suits
+    every room. A unit in `off`, `dry`, `auto` or `fan_only` is ignored.
 
 
-    **Your units will change between heating and cooling on their own.** That is
-    what the blueprint is for. If a room must never have heating, or never have
-    cooling, do not add its unit.
+    ## Read this first
+
+
+    **Your units will change between heating and cooling on their own.** If a
+    room must never have heating, or never have cooling, do not add its unit.
 
 
     **Do not use this and the MHI multi-split mode lockout resolver on the same
-    units.** They work against each other. Use one or the other.
+    units.** They work against each other.
 
 
-    ## Units it leaves alone
-
-
-    A unit in `off`, `dry`, `auto` or `fan_only` is ignored. To take a unit out
-    of the group, set it to `auto` or `off`.
-
-
-    Dry is a known limitation. The blueprint cannot control a unit in dry, and
-    dry holds the outdoor unit in cooling.
-
-
-    ## Lockout protection - multi-split only
-
-
-    One outdoor unit gives one mode at a time. If two units ask for opposite
-    modes, one is locked out and its room drifts.
-
-
-    Set **Lockout protection** to on. The units on the side that ran last go to
-    fan mode for two minutes. This releases the outdoor unit, the waiting side
-    takes it, and the blueprint puts those units back. It needs the Compressor
-    Demand sensors, one for each unit.
-
-
-    Leave it off on a single split, where a lockout cannot happen.
-
-
-    Two things to know. A unit in fan mode warms its own room a little while the
-    system is heating, so keep the fan time short. And if Home Assistant restarts
-    during those two minutes, a unit stays in fan mode and the blueprint cannot
-    recover it - set it back by hand.
-
-
-    ## Idle units in heating
-
-
-    While the outdoor unit is heating, the expansion valve of every indoor unit
-    stays open. A unit that cannot cool still draws air over a warm coil and
-    blows it into its room. In cooling the valves shut and this does not happen.
-
-
-    Set **Put idle units into heating** to on. A unit in cooling that has nothing
-    left to do - its room is at or below its setpoint - is changed to heating. It
-    closes its louvres and stops its fan `[observed on hardware]` instead of
-    blowing warm air for as long as the system heats.
-
-
-    A room above its setpoint still wants cooling. It is left in cooling, keeps
-    its claim on the outdoor unit, and the rotation gives it a turn.
-
-
-    ## Changing a mode yourself
-
-
-    Change a unit between cooling and heating - in Home Assistant, in the app, or
-    on the remote control - and the blueprint acts at once rather than waiting
-    for its next five-minute check.
-
-
-    **If another unit is running the compressor, it keeps it** and your change
-    waits its turn, exactly as before. The immediate hand-over only happens when
-    nothing is running, so there is nothing to interrupt.
-
-
-    ## If a unit is left in fan mode
-
-
-    A stand-down puts a unit in fan mode for a couple of minutes and then puts it
-    back. If that second step cannot happen, because the unit drops off the
-    network or Home Assistant restarts, the unit stays in fan mode. The mode rules
-    ignore fan mode, so nothing brings it back.
-
-
-    Set **Recover units left in fan mode** to on. The blueprint then puts such a
-    unit back into the mode the compressor is running in, so recovery cannot
-    cause a lockout, and tries again on each run until it succeeds. If nothing is
-    running it uses whatever the rest of the group agrees on, and if the group is
-    split as well, the unit's own room against its setpoint.
-
-
-    **While this is on, fan mode is no longer a way to park a unit.** Use `off` or
-    `auto` instead.
-
-
-    ## An accurate room temperature
-
-
-    Each unit measures the room with a sensor in its air inlet, and that reading
-    is only as good as the air moving past it. To improve it, set an **Indoor
-    Offset** on the device, or give the integration a separate room sensor.
-
-
-    ## If it is not doing what you expect
-
-
-    Set **Log every decision** to on. The blueprint then writes one logbook entry
-    on every run saying what it decided and the readings behind it. Turn it off
-    when you have finished.
+    Everything below is optional and each option explains itself. If it is not
+    doing what you expect, turn on **Log every decision**.
   domain: automation
   input:
     fleet:
@@ -452,7 +392,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.9.2"
+  version: "0.9.3"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
@@ -722,14 +662,29 @@ variables:
   mode_change_trigger: >-
     {{ (trigger | default({})).get('id', '') == 'mode_changed' }}
 
+  # The settle time, applied to every unit EXCEPT the one that was just changed.
+  # That unit's new state is what woke this automation, so it is known to be
+  # current; any other unit that changed in the last few minutes may still be
+  # reporting its old mode, and acting on that is what the settle time prevents.
+  settle_others: >-
+    {% set e = (trigger | default({})).get('entity_id', '') %}
+    {% set d = fleet | rejectattr('entity', 'eq', e)
+                     | map(attribute='dwell') | list %}
+    {{ d | count == 0 or d | min >= settle_minutes }}
+
   # Nothing holds the compressor, so the outdoor unit is free and the new mode
-  # can have it now. The settle time exists to stop this automation reading a
-  # state it has just written and has not been reported back yet; a change from
-  # outside is already reported, so there is nothing to wait for.
+  # can have it now.
+  #
+  # `settle_others` rather than dropping the settle time altogether. An earlier
+  # version dropped it for the whole group, which let this run act on a unit
+  # whose mode this automation had written seconds earlier and which had not yet
+  # been polled back. In one arrangement that stood down two units to hand over
+  # to a side that was already claimed, achieving nothing and then blocking a
+  # retry for the length of the cooldown.
   #
   # A unit that is calling still keeps the compressor. That rule does not move.
   immediate: >-
-    {{ mode_change_trigger and in_use | count == 0 }}
+    {{ mode_change_trigger and in_use | count == 0 and settle_others }}
 
   # Everything that has to be true before the automation writes anything.
   ready: >-
@@ -770,14 +725,15 @@ variables:
                    if held | count > 0 else '' -%}
     {%- set now_note = '  (a mode was changed from outside and nothing holds the compressor, so the settle time is skipped)'
                        if immediate else '' -%}
-    {%- if stranded | count > 0 -%}
+    {%- if not settle_passed and not immediate
+           and (stranded | count > 0 or changes | count > 0 or lockout_ready
+                or follow_targets | count > 0) -%}
+      WAIT settle - there is something to do, but a unit changed mode less than
+      {{ settle_minutes }}m ago and may not have reported its new state yet
+    {%- elif stranded | count > 0 -%}
       ACT recovering
       {%- for f in stranded %} {{ f.entity | replace('climate.', '') }}
       {{- ', stranded in fan mode for ' ~ f.mins ~ 'm, back to ' ~ f.want }}{{ ';' if not loop.last }}{% endfor %}
-    {%- elif not settle_passed and not immediate
-             and (changes | count > 0 or lockout_ready) -%}
-      WAIT settle - there is something to do, but a unit changed mode less than
-      {{ settle_minutes }}m ago and may not have reported its new state yet
     {%- elif changes | count > 0 -%}
       ACT mode change:
       {%- for f in changes %} {{ f.entity | replace('climate.', '') }}
