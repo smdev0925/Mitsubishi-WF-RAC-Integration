@@ -63,7 +63,7 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.9.1** — 11 September 2026
+    **Version 0.9.2** — 12 September 2026
 
 
     Replaces the AUTO mode of your indoor units. It chooses cooling or heating
@@ -156,6 +156,19 @@ blueprint:
     its claim on the outdoor unit, and the rotation gives it a turn.
 
 
+    ## Changing a mode yourself
+
+
+    Change a unit between cooling and heating - in Home Assistant, in the app, or
+    on the remote control - and the blueprint acts at once rather than waiting
+    for its next five-minute check.
+
+
+    **If another unit is running the compressor, it keeps it** and your change
+    waits its turn, exactly as before. The immediate hand-over only happens when
+    nothing is running, so there is nothing to interrupt.
+
+
     ## If a unit is left in fan mode
 
 
@@ -166,8 +179,10 @@ blueprint:
 
 
     Set **Recover units left in fan mode** to on. The blueprint then puts such a
-    unit back into cooling or heating, chosen from its own room temperature and
-    setpoint, and tries again on each run until it succeeds.
+    unit back into the mode the compressor is running in, so recovery cannot
+    cause a lockout, and tries again on each run until it succeeds. If nothing is
+    running it uses whatever the rest of the group agrees on, and if the group is
+    split as well, the unit's own room against its setpoint.
 
 
     **While this is on, fan mode is no longer a way to park a unit.** Use `off` or
@@ -343,8 +358,10 @@ blueprint:
         recover_fan:
           name: Recover units left in fan mode
           description: >-
-            Put a unit that has been left in fan mode back into cooling or
-            heating, chosen from its own room temperature and setpoint.
+            Put a unit that has been left in fan mode back into the mode the
+            compressor is running in. If nothing is running, whatever the rest of
+            the group agrees on; if the group is split too, the unit's own room
+            against its setpoint.
 
 
             **While this is on, fan mode is no longer a way to park a unit.** Use
@@ -416,11 +433,26 @@ triggers:
   - trigger: time_pattern
     minutes: "/5"
 
+  # A mode changed between cooling and heating - by you, from the app, or from
+  # the remote control. Waiting up to five minutes to notice is too slow when
+  # nothing holds the compressor, so this fires at once. The from and to lists
+  # keep it to real mode changes: the hourly drop off the network moves a unit
+  # through unavailable and does not match.
+  - trigger: state
+    id: mode_changed
+    entity_id: !input climate_entities
+    from:
+      - cool
+      - heat
+    to:
+      - cool
+      - heat
+
 variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.9.1"
+  version: "0.9.2"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
@@ -609,10 +641,29 @@ variables:
       {{ 5 }}
     {%- endif -%}
 
+  # Which way the outdoor unit is running now: the mode of whichever unit holds
+  # the compressor. Nothing running means no direction.
+  direction: >-
+    {% set m = in_use | map(attribute='mode') | list %}
+    {{ 'heat' if 'heat' in m else 'cool' if 'cool' in m else 'none' }}
+
+  # What a stranded unit goes back to when the compressor is not running:
+  # whatever the rest of the group agrees on, and if the group is split too,
+  # the unit's own room against its setpoint.
+  recovery_agreement: >-
+    {{ 'cool' if cooling_votes | count > 0 and heating_votes | count == 0
+       else 'heat' if heating_votes | count > 0 and cooling_votes | count == 0
+       else 'none' }}
+
   # Units left stranded in fan mode. A stand-down writes fan mode and then writes
   # the mode back; if the second write fails - the unit is unreachable, or Home
   # Assistant restarted - the unit sits in fan mode and the mode rules ignore it
-  # for ever. These are put back into whichever mode their own room asks for.
+  # for ever.
+  #
+  # They go back into the mode the compressor is running in, so recovery never
+  # creates a lockout. If nothing is running there is no direction to copy, so
+  # the next best thing is whatever the rest of the group agrees on; and if the
+  # group is split as well, the unit's own room against its setpoint decides.
   #
   # The time test is what separates a stranded unit from one in the middle of a
   # stand-down: longer in fan mode than the fan time plus the settle time. The
@@ -630,19 +681,15 @@ variables:
                 > relax_minutes | int + settle_minutes %}
         {% set ns.items = ns.items + [{
              'entity': c,
-             'want': 'cool' if temp > target else 'heat',
+             'want': direction if direction in ['cool', 'heat']
+                     else recovery_agreement if recovery_agreement != 'none'
+                     else ('cool' if temp > target else 'heat'),
              'temp': temp,
              'target': target,
              'mins': ((now() - st.last_changed).total_seconds() / 60) | round(1) }] %}
       {% endif %}
     {% endfor %}
     {{ ns.items }}
-
-  # Which way the outdoor unit is running now: the mode of whichever unit holds
-  # the compressor. Nothing running means no direction.
-  direction: >-
-    {% set m = in_use | map(attribute='mode') | list %}
-    {{ 'heat' if 'heat' in m else 'cool' if 'cool' in m else 'none' }}
 
   # Units to move out of cooling while the outdoor unit heats, so they stop
   # drawing air over a warm coil. Only ever into heating: in cooling the valves
@@ -670,11 +717,25 @@ variables:
     {% endfor %}
     {{ ns.items }}
 
+  # A mode was changed between cooling and heating from outside this automation
+  # - by you, the app, or the remote control.
+  mode_change_trigger: >-
+    {{ (trigger | default({})).get('id', '') == 'mode_changed' }}
+
+  # Nothing holds the compressor, so the outdoor unit is free and the new mode
+  # can have it now. The settle time exists to stop this automation reading a
+  # state it has just written and has not been reported back yet; a change from
+  # outside is already reported, so there is nothing to wait for.
+  #
+  # A unit that is calling still keeps the compressor. That rule does not move.
+  immediate: >-
+    {{ mode_change_trigger and in_use | count == 0 }}
+
   # Everything that has to be true before the automation writes anything.
   ready: >-
     {{ (stranded | count > 0 or changes | count > 0 or lockout_ready
         or follow_targets | count > 0)
-       and settle_passed }}
+       and (settle_passed or immediate) }}
 
   # --- what the trace shows ---------------------------------------------------
   # These two change nothing. They exist so that a run which stops at the
@@ -707,11 +768,14 @@ variables:
     {%- set short = held | map(attribute='entity') | map('replace', 'climate.', '') | list -%}
     {%- set hold = '  (also holding ' ~ (short | join(', ')) ~ ' on dwell)'
                    if held | count > 0 else '' -%}
+    {%- set now_note = '  (a mode was changed from outside and nothing holds the compressor, so the settle time is skipped)'
+                       if immediate else '' -%}
     {%- if stranded | count > 0 -%}
       ACT recovering
       {%- for f in stranded %} {{ f.entity | replace('climate.', '') }}
       {{- ', stranded in fan mode for ' ~ f.mins ~ 'm, back to ' ~ f.want }}{{ ';' if not loop.last }}{% endfor %}
-    {%- elif not settle_passed and (changes | count > 0 or lockout_ready) -%}
+    {%- elif not settle_passed and not immediate
+             and (changes | count > 0 or lockout_ready) -%}
       WAIT settle - there is something to do, but a unit changed mode less than
       {{ settle_minutes }}m ago and may not have reported its new state yet
     {%- elif changes | count > 0 -%}
@@ -725,7 +789,7 @@ variables:
     {%- elif lockout_ready -%}
       ACT lockout: stand down
       {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
-      so {{ waiting_side }} can run{{ hold }}
+      so {{ waiting_side }} can run{{ hold }}{{ now_note }}
     {%- elif follow_targets | count > 0 -%}
       ACT the outdoor unit is heating, and
       {{ follow_targets | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
