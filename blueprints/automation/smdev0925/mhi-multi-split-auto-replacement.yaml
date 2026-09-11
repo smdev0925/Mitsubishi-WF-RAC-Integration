@@ -19,6 +19,13 @@
 # has to cover the outdoor unit releasing and selecting a side again, which on a
 # four-unit SCM80 happens within seconds of the modes changing. [HW]
 #
+# IDLE BEHAVIOUR BY MODE [HW]
+# Heating, satisfied: the louvres close and the indoor fan stops. Cooling,
+# satisfied: the fan keeps running. That asymmetry is what makes the "put idle
+# units into heating" option work - a unit parked in cooling under a heating
+# outdoor unit runs its fan over a live coil indefinitely, and the same unit put
+# into heating shuts itself down instead.
+#
 # WHY THE FAN TIME SHOULD STAY SHORT - EEV BEHAVIOUR [HW, SCM multi-split]
 # Measured with the per-unit EEV Position sensor:
 #   nothing running, all units in fan     all valves at 78 %  (= 200, 0xc8)
@@ -137,8 +144,9 @@ blueprint:
 
 
     Set **Put idle units into heating** to on. A unit that is in cooling and is
-    not running is then changed to heating. Its room is already above its
-    setpoint, so it settles at once and stops its fan.
+    not running is then changed to heating. It settles at its own setpoint, closes
+    its louvres and stops its fan `[observed on hardware]`, instead of blowing
+    warm air for as long as the system heats.
 
 
     A unit is left in cooling if its room is more than the Heating Limit above
@@ -291,8 +299,9 @@ blueprint:
           name: Put idle units into heating
           description: >-
             While the outdoor unit is heating, change a unit that is in cooling
-            and is not running into heating. It then reaches its setpoint at once
-            and stops its fan, instead of blowing warm air into the room.
+            and is not running into heating. It settles at its setpoint, closes
+            its louvres and stops its fan, instead of blowing warm air into the
+            room.
 
 
             A unit is left in cooling if its room is already more than the Heating
@@ -823,10 +832,10 @@ actions:
                     The outdoor unit is heating, so
                     {{ follow_targets | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
                     {{ 'goes' if follow_targets | count == 1 else 'go' }} from
-                    cooling to heating. Each one is already at or above its
-                    setpoint, so it settles and stops its fan instead of blowing
-                    warm air. Its own Heating Limit turns it back to cooling if the
-                    room gets too warm.
+                    cooling to heating. Each one then settles at its own setpoint,
+                    closes its louvres and stops its fan, instead of blowing warm
+                    air for as long as the system heats. Its own Heating Limit
+                    turns it back to cooling if the room gets too warm.
               - repeat:
                   for_each: "{{ follow_targets }}"
                   sequence:
