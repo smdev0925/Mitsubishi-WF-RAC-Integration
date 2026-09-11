@@ -127,8 +127,14 @@ blueprint:
     - **There is no mode lock.** In the resolver, a `cool` or `heat` mode is your
       command, and the resolver never changes it. This is why the two blueprints
       stop each other. Here, rule 1 or rule 2 set each mode, thus a change to fan
-      mode for four minutes does not disobey a command. **Use this blueprint or
+      mode for two minutes does not disobey a command. **Use this blueprint or
       the resolver on a unit. Do not use both.**
+
+
+    The second difference also makes the fan time shorter. The resolver must
+    hold a unit in fan mode long enough for it to drop its AUTO latch. No unit
+    here is in AUTO, so there is no latch to drop, and the delay only has to
+    cover the outdoor unit releasing and selecting a side again.
 
 
     The blueprint cannot move a unit in `dry`. Dry requests cooling, and the
@@ -201,8 +207,8 @@ blueprint:
     - Fan mode does not give a correct temperature reading during heating. This
       is why the blueprint does not put a unit into fan mode.
 
-    - A change to fan mode is not free. Four minutes in fan mode during heating
-      puts some heat into that room.
+    - A change to fan mode is not free. Two minutes in fan mode during heating
+      puts some heat into that room. Keep the fan time short.
 
 
     EEV Position is a diagnostic sensor, and it is disabled by default. There is
@@ -346,13 +352,24 @@ blueprint:
         relax_delay:
           name: Time in fan mode
           description: >-
-            The time that the units stay in fan mode. This time must be more
-            than the time for the outdoor unit to release and for the other side
-            to start to call. Four minutes is correct on a four-unit SCM80.
-            Increase this time. Do not decrease it.
+            The time that the units stay in fan mode while the outdoor unit
+            changes side. Two minutes is sufficient on a four-unit SCM80: the
+            outdoor unit selects the new side within seconds of the modes
+            changing `[observed on hardware]`.
+
+
+            This is shorter than the mode lockout resolver uses, and the reason
+            is a different mechanism. That blueprint must hold a unit in fan mode
+            long enough for the unit to drop its AUTO latch. No unit here is in
+            AUTO, so there is no latch. Do not copy that figure across.
+
+
+            Increase this time if the waiting side does not start. But a unit in
+            fan mode during heating puts heat into its room, so do not make it
+            longer than necessary.
           default:
             hours: 0
-            minutes: 4
+            minutes: 2
             seconds: 0
           selector:
             duration:
