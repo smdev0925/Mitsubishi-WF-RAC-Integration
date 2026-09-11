@@ -235,9 +235,29 @@ blueprint:
     state.
 
 
+    **Cooldown** applies to the units that a stand-down would move. It stops the
+    same units being stood down again while they are still at high power from the
+    last change.
+
+
+    All three times are measured from the last mode change of a unit, and not
+    from the last run of this automation. Every change that the blueprint makes
+    writes a mode to a unit, thus the units hold the record. This also lets debug
+    logging write an entry on every run without an effect on the times.
+
+
     One run does one task. If a unit needs a mode change, the blueprint makes the
     change. The lockout check then waits for the next run, when the new modes are
     in the state.
+
+
+    ## Debug logging
+
+
+    Set **Log every decision** to on. The blueprint then writes one logbook entry
+    on each run, with the decision and the data behind it. It is self contained:
+    it needs no helper, and it changes no behaviour. Turn it off when the tests
+    are complete, because it writes approximately 288 entries each day.
   domain: automation
   input:
     fleet:
@@ -373,6 +393,28 @@ blueprint:
             seconds: 0
           selector:
             duration:
+    debug:
+      name: Debug
+      icon: mdi:bug-outline
+      collapsed: true
+      description: >-
+        Write what the automation decided to the logbook on every run, including
+        the runs that do nothing.
+      input:
+        debug_logbook:
+          name: Log every decision
+          description: >-
+            One logbook entry every five minutes saying what was decided and the
+            evidence for it, including the runs that change nothing. It needs no
+            helper and it changes no behaviour: the settle and cooldown times are
+            measured from the units, not from this automation's own last run.
+
+
+            Turn it off when you have finished testing. It writes about 288
+            entries a day.
+          default: false
+          selector:
+            boolean:
     timing:
       name: Timing
       icon: mdi:timer-outline
@@ -428,6 +470,7 @@ variables:
   release_grace_minutes: !input release_grace_minutes
   cooldown_minutes: !input cooldown_minutes
   relax_delay: !input relax_delay
+  debug_logbook: !input debug_logbook
   dwell_minutes: !input dwell_minutes
   settle_minutes: !input settle_minutes
 
@@ -499,6 +542,20 @@ variables:
   changes: "{{ fleet | selectattr('change') | list }}"
   held: "{{ fleet | selectattr('held') | list }}"
 
+  # Settle and cooldown are measured from the units themselves, not from the
+  # automation's last_triggered. Every change this blueprint makes writes a mode
+  # to a unit, which resets that unit's last_changed, so the units carry the
+  # record. This also keeps debug logging free of side effects: it reaches the
+  # actions on every run, which would overwrite last_triggered and stop the
+  # automation acting at all.
+  #
+  # The module drops off the network for about a minute each hour, and that also
+  # resets last_changed. So after a reconnect both gates wait again. That delays
+  # a change; it never causes one.
+  settle_passed: >-
+    {% set d = fleet | map(attribute='dwell') | list %}
+    {{ d | count == 0 or d | min >= settle_minutes }}
+
   # The modes of the units after this run writes all changes. Dry counts as the
   # cooling request that it is.
   after_cooling: >-
@@ -551,9 +608,13 @@ variables:
   # the cooling side.
   blocked_by_dry: "{{ last_served == 'cool' and dry_heads | count > 0 }}"
 
+  # No unit may be stood down twice inside the cooldown. Measured on the units
+  # that would be stood down: a stand-down writes fan mode and then writes the
+  # mode back, so their last_changed is recent for exactly as long as it should
+  # stop another one.
   cooldown_passed: >-
-    {% set lt = this.attributes.get('last_triggered') %}
-    {{ lt is none or (now() - lt).total_seconds() >= cooldown_minutes * 60 }}
+    {% set d = standdown | map(attribute='dwell') | list %}
+    {{ d | count == 0 or d | min >= cooldown_minutes }}
 
   # All conditions for a change to fan mode, but not the dry block. The actions
   # examine the dry block, so that the blueprint reports it.
@@ -561,6 +622,10 @@ variables:
     {{ lockout_protection and conflict and in_use | count == 0
        and last_served in ['cool', 'heat'] and standdown | count > 0
        and cooldown_passed }}
+
+  # Everything that has to be true before the automation writes anything.
+  ready: >-
+    {{ (changes | count > 0 or lockout_ready) and settle_passed }}
 
   # --- what the trace shows ---------------------------------------------------
   # These two change nothing. They exist so that a run which stops at the
@@ -590,13 +655,13 @@ variables:
     {{- '  IGNORED: ' ~ (ns.ignored | join(', ')) if ns.ignored | count > 0 else '' }}
 
   decision: >-
-    {%- set lt = this.attributes.get('last_triggered') -%}
-    {%- set left = 0 if lt is none
-              else (cooldown_minutes - (now() - lt).total_seconds() / 60) | round(1) -%}
     {%- set short = held | map(attribute='entity') | map('replace', 'climate.', '') | list -%}
     {%- set hold = '  (also holding ' ~ (short | join(', ')) ~ ' on dwell)'
                    if held | count > 0 else '' -%}
-    {%- if changes | count > 0 -%}
+    {%- if not settle_passed and (changes | count > 0 or lockout_ready) -%}
+      WAIT settle - there is something to do, but a unit changed mode less than
+      {{ settle_minutes }}m ago and may not have reported its new state yet
+    {%- elif changes | count > 0 -%}
       ACT mode change:
       {%- for f in changes %} {{ f.entity | replace('climate.', '') }}
       {{- ' ' ~ f.mode }}->{{ f.want }}{{ ',' if not loop.last }}{% endfor %}
@@ -631,147 +696,162 @@ variables:
     {%- elif standdown | count == 0 -%}
       IDLE lockout, but there is nothing to stand down{{ hold }}
     {%- elif not cooldown_passed -%}
-      IDLE lockout, but the cooldown has {{ left }}m of
-      {{ cooldown_minutes }}m left{{ hold }}
+      IDLE lockout, but
+      {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
+      changed mode {{ standdown | map(attribute='dwell') | list | min }}m ago,
+      inside the {{ cooldown_minutes }}m cooldown{{ hold }}
     {%- else -%}
       IDLE lockout, reason not classified{{ hold }}
     {%- endif -%}
 
 conditions:
-  # No action is the usual result. Stop here, and do not write a logbook entry
-  # each five minutes. When this is false, `decision` in the trace says why.
-  - alias: Is there anything to do? (read `decision` in the trace)
+  # No action is the usual result, and the run stops here. Debug logging is the
+  # exception: it has to reach the actions, because only an action can write to
+  # the logbook. `ready` carries the settle time, so the actions check it again
+  # before they write anything.
+  - alias: Anything to do, or is debug logging on? (read `decision` in the trace)
     condition: template
-    value_template: "{{ changes | count > 0 or lockout_ready }}"
-
-  # Give the units sufficient time to report their new state. Home Assistant
-  # sets last_triggered when the actions start, thus this time starts at the
-  # last run that made a change.
-  - alias: Has the settle time passed since the last run that did something?
-    condition: template
-    value_template: >-
-      {% set lt = this.attributes.get('last_triggered') %}
-      {{ lt is none or (now() - lt).total_seconds() >= settle_minutes * 60 }}
+    value_template: "{{ ready or debug_logbook }}"
 
 actions:
-  # One run does one task. A mode change is first. The lockout check then waits
-  # for the next run, when the new modes are in the state.
-  - choose:
-      - alias: Change the units that passed a limit
-        conditions:
-          - condition: template
-            value_template: "{{ changes | count > 0 }}"
-        sequence:
-          - alias: Write the changes and their data to the logbook
-            action: logbook.log
-            data:
-              name: MHI AUTO Replacement
-              message: >-
-                Limits −{{ cool_limit }}/+{{ heat_limit }}°C from the setpoint.
-                {% for f in changes %}{{ f.entity | replace('climate.', '') }}:
-                {{ f.mode }} to {{ f.want }}
-                (room {{ f.temp }}°C, setpoint {{ f.target }}°C){{ ", " if not loop.last }}{% endfor %}.
-                {%- if held | count > 0 %}
-                No change to {% for f in held %}{{ f.entity | replace('climate.', '') }}
-                ({{ f.want }} necessary, dwell {{ f.dwell }}m of
-                {{ dwell_minutes }}m){{ ", " if not loop.last }}{% endfor %}.
-                {%- endif %}
+  # Debug logging first, and outside the `ready` gate, so that a run which does
+  # nothing still says what it decided. It writes one entry every five minutes
+  # while it is on.
+  - alias: Debug - write the decision and the evidence to the logbook
+    if:
+      - condition: template
+        value_template: "{{ debug_logbook }}"
+    then:
+      - action: logbook.log
+        data:
+          name: MHI AUTO Replacement (debug)
+          message: "{{ decision }}   ||   {{ report }}"
 
-          - repeat:
-              for_each: "{{ changes }}"
-              sequence:
-                # Read the state again. The blueprint read it at the start of the
-                # run. If the unit changed after that time - manually, from the
-                # app, or from the remote control - that change is more recent
-                # than this one. Each command also holds the module for
-                # approximately one minute.
-                - if:
-                    - condition: template
-                      value_template: "{{ states(repeat.item.entity) == repeat.item.mode }}"
-                  then:
-                    # The mode only. The setpoint is yours, and it does not
-                    # change. Thus the unit controls to the same temperature
-                    # from the other direction.
-                    - action: climate.set_hvac_mode
-                      target:
-                        entity_id: "{{ repeat.item.entity }}"
-                      data:
-                        hvac_mode: "{{ repeat.item.want }}"
-
-          - alias: If the protection is off, report a split and make no change
-            if:
+  # Everything below writes to a unit, so it is gated again here. The condition
+  # above lets debug-only runs through, and they must stop at this point.
+  - alias: Act
+    if:
+      - condition: template
+        value_template: "{{ ready }}"
+    then:
+      # One run does one task. A mode change is first. The lockout check then
+      # waits for the next run, when the new modes are in the state.
+      - choose:
+          - alias: Change the units that passed a limit
+            conditions:
               - condition: template
-                value_template: "{{ not lockout_protection and after_split }}"
-            then:
-              - action: logbook.log
-                data:
-                  name: MHI AUTO Replacement
-                  message: >-
-                    The units request opposite modes. One outdoor unit supplies
-                    one mode, thus one unit is locked out and its room
-                    temperature moves away from the setpoint. Set Lockout
-                    protection to on, or remove a unit from the group.
-
-      - alias: Resolve a lockout
-        conditions:
-          - condition: template
-            value_template: "{{ lockout_ready }}"
-        sequence:
-          - choose:
-              - alias: Dry holds the cooling side
-                conditions:
-                  - condition: template
-                    value_template: "{{ blocked_by_dry }}"
-                sequence:
-                  - action: logbook.log
-                    data:
-                      name: MHI AUTO Replacement
-                      message: >-
-                        Dry holds the outdoor unit. Heating cannot get it,
-                        because
-                        {{ dry_heads | map('replace', 'climate.', '') | join(', ') }}
-                        {{ 'is' if dry_heads | count == 1 else 'are' }} in dry.
-                        Dry requests cooling, and this blueprint does not write
-                        to it. Change it out of dry to release the outdoor unit.
-
-            default:
-              - alias: Write the action and the unit data to the logbook
+                value_template: "{{ changes | count > 0 }}"
+            sequence:
+              - alias: Write the changes and their data to the logbook
                 action: logbook.log
                 data:
                   name: MHI AUTO Replacement
                   message: >-
-                    The {{ last_served }} side operated last. Change
-                    {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
-                    to fan mode for {{ relax_delay }}. The {{ waiting_side }}
-                    side can then operate.
-                    Units: {% for f in fleet %}{{ f.entity | replace('climate.', '') }}
-                    [{{ f.mode }} call={{ 'Y' if f.calling else 'N' }}
-                    quiet={{ f.since }}m {{ f.temp }}/{{ f.target }}C]{{ ", " if not loop.last }}{% endfor %}
+                    Limits −{{ cool_limit }}/+{{ heat_limit }}°C from the setpoint.
+                    {% for f in changes %}{{ f.entity | replace('climate.', '') }}:
+                    {{ f.mode }} to {{ f.want }}
+                    (room {{ f.temp }}°C, setpoint {{ f.target }}°C){{ ", " if not loop.last }}{% endfor %}.
+                    {%- if held | count > 0 %}
+                    No change to {% for f in held %}{{ f.entity | replace('climate.', '') }}
+                    ({{ f.want }} necessary, dwell {{ f.dwell }}m of
+                    {{ dwell_minutes }}m){{ ", " if not loop.last }}{% endfor %}.
+                    {%- endif %}
 
-              - alias: Change that side to fan mode to remove its demand
-                action: climate.set_hvac_mode
-                target:
-                  entity_id: "{{ standdown | map(attribute='entity') | list }}"
-                data:
-                  hvac_mode: fan_only
-
-              - alias: Wait for the outdoor unit to change side
-                delay: "{{ relax_delay }}"
-
-              - alias: Put each unit back to its mode
-                repeat:
-                  for_each: "{{ standdown }}"
+              - repeat:
+                  for_each: "{{ changes }}"
                   sequence:
-                    # Write only if the unit is still in fan mode. If you changed
-                    # the mode during the delay, your mode stays. A command that
-                    # makes no change also holds the module for approximately one
-                    # minute.
+                    # Read the state again. The blueprint read it at the start of the
+                    # run. If the unit changed after that time - manually, from the
+                    # app, or from the remote control - that change is more recent
+                    # than this one. Each command also holds the module for
+                    # approximately one minute.
                     - if:
                         - condition: template
-                          value_template: "{{ states(repeat.item.entity) == 'fan_only' }}"
+                          value_template: "{{ states(repeat.item.entity) == repeat.item.mode }}"
                       then:
+                        # The mode only. The setpoint is yours, and it does not
+                        # change. Thus the unit controls to the same temperature
+                        # from the other direction.
                         - action: climate.set_hvac_mode
                           target:
                             entity_id: "{{ repeat.item.entity }}"
                           data:
-                            hvac_mode: "{{ repeat.item.mode }}"
+                            hvac_mode: "{{ repeat.item.want }}"
+
+              - alias: If the protection is off, report a split and make no change
+                if:
+                  - condition: template
+                    value_template: "{{ not lockout_protection and after_split }}"
+                then:
+                  - action: logbook.log
+                    data:
+                      name: MHI AUTO Replacement
+                      message: >-
+                        The units request opposite modes. One outdoor unit supplies
+                        one mode, thus one unit is locked out and its room
+                        temperature moves away from the setpoint. Set Lockout
+                        protection to on, or remove a unit from the group.
+
+          - alias: Resolve a lockout
+            conditions:
+              - condition: template
+                value_template: "{{ lockout_ready }}"
+            sequence:
+              - choose:
+                  - alias: Dry holds the cooling side
+                    conditions:
+                      - condition: template
+                        value_template: "{{ blocked_by_dry }}"
+                    sequence:
+                      - action: logbook.log
+                        data:
+                          name: MHI AUTO Replacement
+                          message: >-
+                            Dry holds the outdoor unit. Heating cannot get it,
+                            because
+                            {{ dry_heads | map('replace', 'climate.', '') | join(', ') }}
+                            {{ 'is' if dry_heads | count == 1 else 'are' }} in dry.
+                            Dry requests cooling, and this blueprint does not write
+                            to it. Change it out of dry to release the outdoor unit.
+
+                default:
+                  - alias: Write the action and the unit data to the logbook
+                    action: logbook.log
+                    data:
+                      name: MHI AUTO Replacement
+                      message: >-
+                        The {{ last_served }} side operated last. Change
+                        {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
+                        to fan mode for {{ relax_delay }}. The {{ waiting_side }}
+                        side can then operate.
+                        Units: {% for f in fleet %}{{ f.entity | replace('climate.', '') }}
+                        [{{ f.mode }} call={{ 'Y' if f.calling else 'N' }}
+                        quiet={{ f.since }}m {{ f.temp }}/{{ f.target }}C]{{ ", " if not loop.last }}{% endfor %}
+
+                  - alias: Change that side to fan mode to remove its demand
+                    action: climate.set_hvac_mode
+                    target:
+                      entity_id: "{{ standdown | map(attribute='entity') | list }}"
+                    data:
+                      hvac_mode: fan_only
+
+                  - alias: Wait for the outdoor unit to change side
+                    delay: "{{ relax_delay }}"
+
+                  - alias: Put each unit back to its mode
+                    repeat:
+                      for_each: "{{ standdown }}"
+                      sequence:
+                        # Write only if the unit is still in fan mode. If you changed
+                        # the mode during the delay, your mode stays. A command that
+                        # makes no change also holds the module for approximately one
+                        # minute.
+                        - if:
+                            - condition: template
+                              value_template: "{{ states(repeat.item.entity) == 'fan_only' }}"
+                          then:
+                            - action: climate.set_hvac_mode
+                              target:
+                                entity_id: "{{ repeat.item.entity }}"
+                              data:
+                                hvac_mode: "{{ repeat.item.mode }}"
