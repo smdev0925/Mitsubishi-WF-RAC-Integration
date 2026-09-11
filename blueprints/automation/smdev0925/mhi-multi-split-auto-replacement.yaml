@@ -414,6 +414,21 @@ variables:
   dwell_minutes: !input dwell_minutes
   settle_minutes: !input settle_minutes
 
+  # Home Assistant renders these variables in the order they are written, and
+  # each one sees only the variables above it. A reference to one further down
+  # raises UndefinedError, and the run is abandoned before the conditions are
+  # reached - no actions, no logbook entry, only a line in the log. So the
+  # variables with no dependencies of their own come first.
+  #
+  # The units in dry. Dry is a cooling request that the blueprint cannot change,
+  # because it does not write to dry. Needed by four variables below.
+  dry_heads: >-
+    {% set ns = namespace(items=[]) %}
+    {% for c in climate_entities if states(c) == 'dry' %}
+      {% set ns.items = ns.items + [c] %}
+    {% endfor %}
+    {{ ns.items }}
+
   # One row for each unit in the group: on, available, in cool or heat, and with
   # a room temperature and a setpoint. The modes off, dry, auto and fan_only are
   # not in this list.
@@ -467,17 +482,6 @@ variables:
   changes: "{{ fleet | selectattr('change') | list }}"
   held: "{{ fleet | selectattr('held') | list }}"
 
-  # --- lockout ---------------------------------------------------------------
-  # The mode of a unit is its request. No unit is in AUTO, thus there is no
-  # selection to read from a Cool/Heat Status sensor. Dry is a cooling request
-  # that the blueprint cannot change, because it does not write to dry.
-  dry_heads: >-
-    {% set ns = namespace(items=[]) %}
-    {% for c in climate_entities if states(c) == 'dry' %}
-      {% set ns.items = ns.items + [c] %}
-    {% endfor %}
-    {{ ns.items }}
-
   # The modes of the units after this run writes all changes. Dry counts as the
   # cooling request that it is.
   after_cooling: >-
@@ -489,6 +493,9 @@ variables:
     {{ after_cooling | count > 0 and after_heating | count > 0 }}
 
   # --- lockout ---------------------------------------------------------------
+  # --- lockout ---------------------------------------------------------------
+  # The mode of a unit is its request. No unit is in AUTO, thus there is no
+  # selection to read from a Cool/Heat Status sensor.
   cooling_votes: >-
     {{ (fleet | selectattr('mode', 'eq', 'cool') | map(attribute='entity') | list)
        + dry_heads }}
