@@ -467,16 +467,6 @@ variables:
   changes: "{{ fleet | selectattr('change') | list }}"
   held: "{{ fleet | selectattr('held') | list }}"
 
-  # The modes of the units after this run writes all changes. Dry counts as the
-  # cooling request that it is.
-  after_cooling: >-
-    {{ (fleet | selectattr('after', 'eq', 'cool') | map(attribute='entity') | list)
-       + dry_heads }}
-  after_heating: >-
-    {{ fleet | selectattr('after', 'eq', 'heat') | map(attribute='entity') | list }}
-  after_split: >-
-    {{ after_cooling | count > 0 and after_heating | count > 0 }}
-
   # --- lockout ---------------------------------------------------------------
   # The mode of a unit is its request. No unit is in AUTO, thus there is no
   # selection to read from a Cool/Heat Status sensor. Dry is a cooling request
@@ -488,6 +478,17 @@ variables:
     {% endfor %}
     {{ ns.items }}
 
+  # The modes of the units after this run writes all changes. Dry counts as the
+  # cooling request that it is.
+  after_cooling: >-
+    {{ (fleet | selectattr('after', 'eq', 'cool') | map(attribute='entity') | list)
+       + dry_heads }}
+  after_heating: >-
+    {{ fleet | selectattr('after', 'eq', 'heat') | map(attribute='entity') | list }}
+  after_split: >-
+    {{ after_cooling | count > 0 and after_heating | count > 0 }}
+
+  # --- lockout ---------------------------------------------------------------
   cooling_votes: >-
     {{ (fleet | selectattr('mode', 'eq', 'cool') | map(attribute='entity') | list)
        + dry_heads }}
