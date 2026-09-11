@@ -16,19 +16,22 @@ who use them on their own systems.
   ([discussion](https://github.com/blues-sechseck/Mitsubishi-WF-RAC-Integration/discussions/328))
 
 - **[MHI multi-split AUTO replacement](automation/smdev0925/mhi-multi-split-auto-replacement.yaml)**
-  by [smdev0925](https://github.com/smdev0925) — replaces the AUTO mode of each
-  indoor unit. It selects cooling or heating from the room temperature and the
-  setpoint of the unit. The setpoint is the temperature that you want: the
-  blueprint reads it from the unit and never writes one. The two limits are
-  distances from that setpoint, not temperatures, thus one pair of values is
-  correct for all rooms. If a unit cools and the room goes below the setpoint
-  minus the Cooling Limit, the unit changes to heating. If a unit heats and the
-  room goes above the setpoint plus the Heating Limit, the unit changes to
-  cooling. In all other conditions it makes no change. It ignores `off`, `dry`,
-  `auto` and `fan_only`; dry is a known limitation. Optional lockout protection
-  uses the rules of the resolver above, but it needs no Cool/Heat Status sensor,
-  because the mode of a unit is its request. **Use this blueprint or the resolver
-  on a unit. Do not use both. Not yet tested on hardware.**
+  by [smdev0925](https://github.com/smdev0925) — takes MHI's AUTO off each
+  indoor unit and makes the heat/cool decision outside the unit. The setpoint
+  stays yours: the blueprint reads it and never writes one. The two limits are
+  distances from that setpoint rather than temperatures, so one pair of values
+  suits every room and the band moves when you move the setpoint. A unit cooling
+  whose room falls past the Cooling Limit turns to heating; a unit heating whose
+  room rises past the Heating Limit turns to cooling; everything else is left
+  alone. `off`, `dry`, `auto` and `fan_only` are ignored, and dry is a known
+  limitation. Optional lockout protection resolves the split this creates on a
+  multi-split, using the rules of the resolver above but without needing a
+  Cool/Heat Status sensor, because no unit is in AUTO and a unit's mode is its
+  request. A debug switch writes every decision, and the reason for it, to the
+  logbook. **Use this blueprint or the resolver on a unit, never both — they
+  deadlock each other.** Lockout protection is proven on a four-head SCM80: the
+  stand-down, the two-minute fan time, the restore and the handover all complete.
+  The mode-change rules have not yet been seen to fire on hardware.
 
 ## Why they live here and not in the integration
 
