@@ -143,15 +143,14 @@ blueprint:
     blows it into its room. In cooling the valves shut and this does not happen.
 
 
-    Set **Put idle units into heating** to on. A unit that is in cooling and is
-    not running is then changed to heating. It settles at its own setpoint, closes
-    its louvres and stops its fan `[observed on hardware]`, instead of blowing
-    warm air for as long as the system heats.
+    Set **Put idle units into heating** to on. A unit in cooling that has nothing
+    left to do - its room is at or below its setpoint - is changed to heating. It
+    closes its louvres and stops its fan `[observed on hardware]` instead of
+    blowing warm air for as long as the system heats.
 
 
-    A unit is left in cooling if its room is more than the Heating Limit above
-    its setpoint. That room needs cooling, and leaving it in cooling keeps its
-    claim on the outdoor unit. The rotation still gives it a turn.
+    A room above its setpoint still wants cooling. It is left in cooling, keeps
+    its claim on the outdoor unit, and the rotation gives it a turn.
 
 
     ## An accurate room temperature
@@ -299,14 +298,13 @@ blueprint:
           name: Put idle units into heating
           description: >-
             While the outdoor unit is heating, change a unit that is in cooling
-            and is not running into heating. It settles at its setpoint, closes
-            its louvres and stops its fan, instead of blowing warm air into the
-            room.
+            into heating - but only one that has nothing left to do, meaning its
+            room is at or below its setpoint. It closes its louvres and stops its
+            fan instead of blowing warm air into the room.
 
 
-            A unit is left in cooling if its room is already more than the Heating
-            Limit above its setpoint, so a room that really needs cooling keeps
-            its claim on the outdoor unit.
+            A room above its setpoint still wants cooling, so it is left in
+            cooling and keeps its claim on the outdoor unit.
           default: false
           selector:
             boolean:
@@ -561,17 +559,23 @@ variables:
   # drawing air over a warm coil. Only ever into heating: in cooling the valves
   # of the idle units shut, so there is nothing to fix.
   #
-  # The last test is what stops this fighting rule 2. A unit moved into heating
-  # whose room is already past its Heating Limit would be turned straight back to
-  # cooling on the next run, and moved again after that, for ever. Leaving those
-  # units in cooling also keeps their claim on the outdoor unit, so the rotation
-  # still gives them a turn.
+  # The last test is the important one: the room must be at or below its
+  # setpoint, so the unit has no cooling left to do. A room above its setpoint
+  # wants cooling, and it keeps its mode so that it keeps its claim on the
+  # outdoor unit and the rotation gives it a turn.
+  #
+  # An earlier version allowed anything up to the setpoint plus the Heating
+  # Limit. That moved rooms that were a full degree above their setpoint and
+  # plainly wanted cooling, and because this branch can act during the release
+  # grace while the rotation cannot, it took their claim away moments before the
+  # rotation would have served them. It also let a room be moved while sitting
+  # exactly on its flip point, so rule 2 turned it straight back.
   follow_targets: >-
     {% set ns = namespace(items=[]) %}
     {% for f in fleet %}
       {% if follow_heat and direction == 'heat' and f.mode == 'cool'
             and not f.calling and f.dwell >= dwell_minutes
-            and f.temp <= f.target + heat_limit %}
+            and f.temp <= f.target %}
         {% set ns.items = ns.items + [f] %}
       {% endif %}
     {% endfor %}
@@ -629,9 +633,10 @@ variables:
       {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
       so {{ waiting_side }} can run{{ hold }}
     {%- elif follow_targets | count > 0 -%}
-      ACT the outdoor unit is heating, so
+      ACT the outdoor unit is heating, and
       {{ follow_targets | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
-      {{ 'goes' if follow_targets | count == 1 else 'go' }} from cooling to
+      {{ 'has' if follow_targets | count == 1 else 'have' }} no cooling left to
+      do, so {{ 'it goes' if follow_targets | count == 1 else 'they go' }} to
       heating and will stop blowing warm air{{ hold }}
     {%- elif fleet | count == 0 -%}
       IDLE no unit is in cool or heat with both a room temperature and a setpoint
@@ -832,10 +837,14 @@ actions:
                     The outdoor unit is heating, so
                     {{ follow_targets | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
                     {{ 'goes' if follow_targets | count == 1 else 'go' }} from
-                    cooling to heating. Each one then settles at its own setpoint,
-                    closes its louvres and stops its fan, instead of blowing warm
-                    air for as long as the system heats. Its own Heating Limit
-                    turns it back to cooling if the room gets too warm.
+                    cooling to heating.
+                    {{ 'It has' if follow_targets | count == 1 else 'They have' }}
+                    no cooling left to do, so
+                    {{ 'it closes its louvres and stops its fan' if follow_targets | count == 1
+                       else 'they close their louvres and stop their fans' }}
+                    instead of blowing warm air for as long as the system heats.
+                    A room above its setpoint is left in cooling, so it keeps its
+                    claim on the outdoor unit.
               - repeat:
                   for_each: "{{ follow_targets }}"
                   sequence:
