@@ -63,7 +63,7 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.9.0** — 11 September 2026
+    **Version 0.9.1** — 11 September 2026
 
 
     Replaces the AUTO mode of your indoor units. It chooses cooling or heating
@@ -154,6 +154,24 @@ blueprint:
 
     A room above its setpoint still wants cooling. It is left in cooling, keeps
     its claim on the outdoor unit, and the rotation gives it a turn.
+
+
+    ## If a unit is left in fan mode
+
+
+    A stand-down puts a unit in fan mode for a couple of minutes and then puts it
+    back. If that second step cannot happen, because the unit drops off the
+    network or Home Assistant restarts, the unit stays in fan mode. The mode rules
+    ignore fan mode, so nothing brings it back.
+
+
+    Set **Recover units left in fan mode** to on. The blueprint then puts such a
+    unit back into cooling or heating, chosen from its own room temperature and
+    setpoint, and tries again on each run until it succeeds.
+
+
+    **While this is on, fan mode is no longer a way to park a unit.** Use `off` or
+    `auto` instead.
 
 
     ## An accurate room temperature
@@ -312,6 +330,29 @@ blueprint:
           selector:
             boolean:
 
+    recovery:
+      name: Recovery
+      icon: mdi:backup-restore
+      collapsed: true
+      description: >-
+        A stand-down puts a unit in fan mode for a couple of minutes and then
+        puts it back. If that second step cannot happen - the unit drops off the
+        network, or Home Assistant restarts - the unit stays in fan mode and
+        nothing brings it back.
+      input:
+        recover_fan:
+          name: Recover units left in fan mode
+          description: >-
+            Put a unit that has been left in fan mode back into cooling or
+            heating, chosen from its own room temperature and setpoint.
+
+
+            **While this is on, fan mode is no longer a way to park a unit.** Use
+            `off` or `auto` to take a unit out of the group instead.
+          default: false
+          selector:
+            boolean:
+
     debug:
       name: Debug
       icon: mdi:bug-outline
@@ -379,7 +420,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.9.0"
+  version: "0.9.1"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
@@ -389,6 +430,7 @@ variables:
   release_grace_minutes: !input release_grace_minutes
   cooldown_minutes: !input cooldown_minutes
   relax_delay: !input relax_delay
+  recover_fan: !input recover_fan
   follow_heat: !input follow_heat
   debug_logbook: !input debug_logbook
   dwell_minutes: !input dwell_minutes
@@ -557,6 +599,45 @@ variables:
        and last_served in ['cool', 'heat'] and standdown | count > 0
        and cooldown_passed }}
 
+  # The fan time in whole minutes, for the recovery test below.
+  relax_minutes: >-
+    {%- if relax_delay is mapping -%}
+      {{ (relax_delay.hours | default(0) | int) * 60
+         + (relax_delay.minutes | default(0) | int)
+         + ((relax_delay.seconds | default(0) | int) / 60) | round(0, 'ceil') | int }}
+    {%- else -%}
+      {{ 5 }}
+    {%- endif -%}
+
+  # Units left stranded in fan mode. A stand-down writes fan mode and then writes
+  # the mode back; if the second write fails - the unit is unreachable, or Home
+  # Assistant restarted - the unit sits in fan mode and the mode rules ignore it
+  # for ever. These are put back into whichever mode their own room asks for.
+  #
+  # The time test is what separates a stranded unit from one in the middle of a
+  # stand-down: longer in fan mode than the fan time plus the settle time. The
+  # automation is mode: single, so a stand-down cannot be running while this is
+  # evaluated, but the margin costs nothing.
+  stranded: >-
+    {% set ns = namespace(items=[]) %}
+    {% for c in climate_entities %}
+      {% set st = states[c] %}
+      {% set temp = state_attr(c, 'current_temperature') %}
+      {% set target = state_attr(c, 'temperature') %}
+      {% if recover_fan and st is not none and st.state == 'fan_only'
+            and temp is number and target is number
+            and (now() - st.last_changed).total_seconds() / 60
+                > relax_minutes | int + settle_minutes %}
+        {% set ns.items = ns.items + [{
+             'entity': c,
+             'want': 'cool' if temp > target else 'heat',
+             'temp': temp,
+             'target': target,
+             'mins': ((now() - st.last_changed).total_seconds() / 60) | round(1) }] %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.items }}
+
   # Which way the outdoor unit is running now: the mode of whichever unit holds
   # the compressor. Nothing running means no direction.
   direction: >-
@@ -591,7 +672,8 @@ variables:
 
   # Everything that has to be true before the automation writes anything.
   ready: >-
-    {{ (changes | count > 0 or lockout_ready or follow_targets | count > 0)
+    {{ (stranded | count > 0 or changes | count > 0 or lockout_ready
+        or follow_targets | count > 0)
        and settle_passed }}
 
   # --- what the trace shows ---------------------------------------------------
@@ -625,7 +707,11 @@ variables:
     {%- set short = held | map(attribute='entity') | map('replace', 'climate.', '') | list -%}
     {%- set hold = '  (also holding ' ~ (short | join(', ')) ~ ' on dwell)'
                    if held | count > 0 else '' -%}
-    {%- if not settle_passed and (changes | count > 0 or lockout_ready) -%}
+    {%- if stranded | count > 0 -%}
+      ACT recovering
+      {%- for f in stranded %} {{ f.entity | replace('climate.', '') }}
+      {{- ', stranded in fan mode for ' ~ f.mins ~ 'm, back to ' ~ f.want }}{{ ';' if not loop.last }}{% endfor %}
+    {%- elif not settle_passed and (changes | count > 0 or lockout_ready) -%}
       WAIT settle - there is something to do, but a unit changed mode less than
       {{ settle_minutes }}m ago and may not have reported its new state yet
     {%- elif changes | count > 0 -%}
@@ -710,6 +796,39 @@ actions:
       # One run does one task. A mode change is first. The lockout check then
       # waits for the next run, when the new modes are in the state.
       - choose:
+          # First. A stranded unit is doing nothing for its room and the mode
+          # rules cannot see it, so it stays stranded until this puts it back.
+          # It is also the retry: if the unit is still unreachable this fails
+          # again, harmlessly, and the next run tries once more.
+          - alias: Recover units left stranded in fan mode
+            conditions:
+              - condition: template
+                value_template: "{{ stranded | count > 0 }}"
+            sequence:
+              - action: logbook.log
+                data:
+                  name: MHI AUTO Replacement
+                  message: >-
+                    v{{ version }} — recovering
+                    {% for f in stranded %}{{ f.entity | replace('climate.', '') }},
+                    left in fan mode {{ f.mins }}m ago, back to {{ f.want }}
+                    (room {{ f.temp }}°C, setpoint {{ f.target }}°C){{ "; " if not loop.last }}{% endfor %}.
+                    A stand-down could not finish, most likely because the unit
+                    was unreachable.
+              - repeat:
+                  for_each: "{{ stranded }}"
+                  sequence:
+                    - if:
+                        - condition: template
+                          value_template: "{{ states(repeat.item.entity) == 'fan_only' }}"
+                      then:
+                        - action: climate.set_hvac_mode
+                          continue_on_error: true
+                          target:
+                            entity_id: "{{ repeat.item.entity }}"
+                          data:
+                            hvac_mode: "{{ repeat.item.want }}"
+
           - alias: Change the units that passed a limit
             conditions:
               - condition: template
@@ -747,6 +866,7 @@ actions:
                         # change. Thus the unit controls to the same temperature
                         # from the other direction.
                         - action: climate.set_hvac_mode
+                          continue_on_error: true
                           target:
                             entity_id: "{{ repeat.item.entity }}"
                           data:
@@ -805,6 +925,7 @@ actions:
 
                   - alias: Change that side to fan mode to remove its demand
                     action: climate.set_hvac_mode
+                    continue_on_error: true
                     target:
                       entity_id: "{{ standdown | map(attribute='entity') | list }}"
                     data:
@@ -826,6 +947,7 @@ actions:
                               value_template: "{{ states(repeat.item.entity) == 'fan_only' }}"
                           then:
                             - action: climate.set_hvac_mode
+                              continue_on_error: true
                               target:
                                 entity_id: "{{ repeat.item.entity }}"
                               data:
@@ -863,6 +985,7 @@ actions:
                           value_template: "{{ states(repeat.item.entity) == 'cool' }}"
                       then:
                         - action: climate.set_hvac_mode
+                          continue_on_error: true
                           target:
                             entity_id: "{{ repeat.item.entity }}"
                           data:
