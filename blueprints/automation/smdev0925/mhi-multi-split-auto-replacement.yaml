@@ -63,6 +63,9 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
+    **Version 0.9.0** — 11 September 2026
+
+
     Replaces the AUTO mode of your indoor units. It chooses cooling or heating
     from the room temperature and the setpoint that is already on the unit.
 
@@ -373,6 +376,11 @@ triggers:
     minutes: "/5"
 
 variables:
+  # Bumped on every change. It appears at the top of the description, in the
+  # trace, and at the front of every logbook entry, so the version actually
+  # running can be read off a live system rather than assumed.
+  version: "0.9.0"
+
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
   heat_limit: !input heat_limit
@@ -690,7 +698,7 @@ actions:
       - action: logbook.log
         data:
           name: MHI AUTO Replacement (debug)
-          message: "{{ decision }}   ||   {{ report }}"
+          message: "v{{ version }}  {{ decision }}   ||   {{ report }}"
 
   # Everything below writes to a unit, so it is gated again here. The condition
   # above lets debug-only runs through, and they must stop at this point.
@@ -712,7 +720,8 @@ actions:
                 data:
                   name: MHI AUTO Replacement
                   message: >-
-                    Limits −{{ cool_limit }}/+{{ heat_limit }}°C from the setpoint.
+                    v{{ version }} — limits −{{ cool_limit }}/+{{ heat_limit }}°C
+                    from the setpoint.
                     {% for f in changes %}{{ f.entity | replace('climate.', '') }}:
                     {{ f.mode }} to {{ f.want }}
                     (room {{ f.temp }}°C, setpoint {{ f.target }}°C){{ ", " if not loop.last }}{% endfor %}.
@@ -785,7 +794,8 @@ actions:
                     data:
                       name: MHI AUTO Replacement
                       message: >-
-                        The {{ last_served }} side operated last. Change
+                        v{{ version }} — the {{ last_served }} side operated
+                        last. Change
                         {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
                         to fan mode for {{ fan_time }}. The {{ waiting_side }}
                         side can then operate.
@@ -834,7 +844,7 @@ actions:
                 data:
                   name: MHI AUTO Replacement
                   message: >-
-                    The outdoor unit is heating, so
+                    v{{ version }} — the outdoor unit is heating, so
                     {{ follow_targets | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
                     {{ 'goes' if follow_targets | count == 1 else 'go' }} from
                     cooling to heating.
