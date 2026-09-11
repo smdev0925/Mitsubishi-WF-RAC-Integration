@@ -60,6 +60,25 @@ Home Assistant fetches it, checks it, and stores it under
 up under "Create automation → Use a blueprint". Re-importing the same URL later
 picks up changes.
 
+## Keeping one up to date
+
+Re-importing the same URL picks up changes, but you have to remember to do it,
+and two things quietly hand you a stale copy: `raw.githubusercontent.com` caches
+for five minutes, so a re-import straight after a push fetches the old file; and
+Home Assistant keeps parsed blueprints in memory, so editing the file on disk by
+hand changes nothing until you re-import or restart.
+
+[Blueprints Updater](https://github.com/luuquangvu/blueprints-updater) (MIT,
+install as a HACS custom repository under **Integration**) removes the chore. It
+watches the `source_url` each blueprint was imported from, offers updates as
+normal Home Assistant update entities, and can apply them automatically with a
+backup. It needs Home Assistant 2024.12 or later — one release newer than these
+blueprints require.
+
+Either way, check what is actually running rather than what the file says. The
+AUTO replacement blueprint prints its version at the front of every logbook
+entry for that reason.
+
 Each blueprint's header says which entities it needs. Several of the useful ones
 are diagnostic entities that are **disabled by default** — you turn those on
 under Settings → Devices & services → the device → "+N entities not shown".

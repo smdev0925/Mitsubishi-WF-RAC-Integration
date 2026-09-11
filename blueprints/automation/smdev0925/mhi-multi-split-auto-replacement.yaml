@@ -100,7 +100,13 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.9.3** — 12 September 2026
+    **Version 0.9.4** — 12 September 2026
+
+
+    To keep this up to date automatically, install
+    [Blueprints Updater](https://github.com/luuquangvu/blueprints-updater) from
+    HACS. It watches each blueprint's source and updates it in place, so you do
+    not have to re-import by hand. Needs Home Assistant 2024.12 or later.
 
 
     Replaces the AUTO mode of your indoor units. It chooses cooling or heating
@@ -392,7 +398,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.9.3"
+  version: "0.9.4"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
