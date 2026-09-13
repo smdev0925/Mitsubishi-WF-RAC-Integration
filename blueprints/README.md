@@ -32,9 +32,13 @@ who use them on their own systems.
   it settles, closes its louvres and stops its fan, rather than blowing warm air
   into a room that did not ask for it. A debug switch writes every decision, and
   the reason for it, to the logbook. **Use this blueprint or the resolver on a
-  unit, never both — they deadlock each other.** Lockout protection is proven on a four-head SCM80: the
-  stand-down, the two-minute fan time, the restore and the handover all complete.
-  The mode-change rules have not yet been seen to fire on hardware.
+  unit, never both — they deadlock each other.** Proven on a four-head SCM80: the stand-down with its
+  two-minute fan time, the restore and the handover; the idle-units option; the
+  immediate response to a mode changed by hand; and recovery leaving alone a fan
+  mode set in Home Assistant. **The mode-change rules themselves — a unit
+  turning around at its own limit — have still not been seen to fire on
+  hardware**, nor has a genuine recovery from a stranded unit, nor the dry
+  block.
 
 ## Why they live here and not in the integration
 

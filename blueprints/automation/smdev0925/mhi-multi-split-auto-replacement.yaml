@@ -29,7 +29,10 @@
 # it. The option puts it back into the mode the compressor is running in, and
 # retries every run. It skips any unit whose fan_only state carries a user_id,
 # which is how a change made by a person inside Home Assistant is marked; an
-# automation's service call never sets one. A change from the remote control or
+# automation's service call never sets one. Confirmed on hardware: this
+# integration carries the service-call context through to the state write, so a
+# unit set to fan in the Home Assistant UI keeps its user_id and is left alone.
+# [HW] A change from the remote control or
 # the MHI app arrives by polling with an empty context and is indistinguishable
 # from ours, so that one is still recovered.
 #
@@ -103,7 +106,7 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.9.6** — 13 September 2026
+    **Version 0.9.7** — 13 September 2026
 
 
     To keep this up to date automatically, install
@@ -403,7 +406,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.9.6"
+  version: "0.9.7"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
