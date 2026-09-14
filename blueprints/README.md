@@ -34,8 +34,8 @@ who use them on their own systems.
   the reason for it, to the logbook. **Use this blueprint or the resolver on a
   unit, never both — they deadlock each other.** Proven on a four-head SCM80: the stand-down with its
   two-minute fan time, the restore and the handover; the idle-units option; the
-  immediate response to a mode changed by hand; and recovery leaving alone a fan
-  mode set in Home Assistant. **The mode-change rules themselves — a unit
+  immediate response to a mode changed by hand; and the immediate response to a mode
+  changed by hand. **The mode-change rules themselves — a unit
   turning around at its own limit — have still not been seen to fire on
   hardware**, nor has a genuine recovery from a stranded unit, nor the dry
   block.

@@ -27,12 +27,19 @@
 # Recovery. If a stand-down cannot finish - the unit drops off the network, or
 # Home Assistant restarts - the unit stays in fan mode and the mode rules ignore
 # it. The option puts it back into the mode the compressor is running in, and
-# retries every run. It skips any unit whose fan_only state carries a user_id,
-# which is how a change made by a person inside Home Assistant is marked; an
-# automation's service call never sets one. Confirmed on hardware: this
-# integration carries the service-call context through to the state write, so a
-# unit set to fan in the Home Assistant UI keeps its user_id and is left alone.
-# [HW] A change from the remote control or
+# retries every run. It cannot tell who set fan mode, so it takes any unit it
+# finds there; the exemption list is how you keep one.
+#
+# A context check was tried and removed. A state does carry the caller's
+# user_id, and an automation's service call never sets one, so on paper it
+# separated a person's change from ours - and it appeared to work when tested
+# within a few seconds. It cannot: Entity keeps the caller's context for
+# CONTEXT_RECENT_TIME_SECONDS, which is 5, then drops it, and every poll after
+# that writes a fresh empty one. A climate entity's attributes change on nearly
+# every poll, so the marker is gone within a minute. Recovery only looks at
+# units in fan mode for longer than the fan time plus the settle time, so it
+# never saw a user_id at all. [HW: confirmed failing - a unit set to fan in the
+# UI was still recovered] A change from the remote control or
 # the MHI app arrives by polling with an empty context and is indistinguishable
 # from ours, so that one is still recovered.
 #
@@ -106,7 +113,7 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.9.7** — 13 September 2026
+    **Version 0.9.8** — 14 September 2026
 
 
     To keep this up to date automatically, install
@@ -307,6 +314,20 @@ blueprint:
         network, or Home Assistant restarts - the unit stays in fan mode and
         nothing brings it back.
       input:
+        never_recover:
+          name: Units to leave in fan mode
+          description: >-
+            Units listed here are never recovered, so you can park one in fan
+            mode and it stays there. Leave empty to recover any unit found in
+            fan mode.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - integration: mitsubishi_wf_rac
+                  domain: climate
+
         recover_fan:
           name: Recover units left in fan mode
           description: >-
@@ -316,10 +337,9 @@ blueprint:
             against its setpoint.
 
 
-            Set a unit to fan **in Home Assistant** and it is left alone. Set it
-            on the remote control or in the MHI app and it cannot be told apart
-            from a stranded one, so it will be recovered — use `off` or `auto`
-            there instead.
+            **It cannot tell who set fan mode**, so while this is on, any unit
+            found in fan mode is recovered. To park one in fan, add it to the
+            list above, or use `off` or `auto` instead.
           default: false
           selector:
             boolean:
@@ -406,7 +426,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.9.7"
+  version: "0.9.8"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
@@ -417,6 +437,7 @@ variables:
   cooldown_minutes: !input cooldown_minutes
   relax_delay: !input relax_delay
   recover_fan: !input recover_fan
+  never_recover: !input never_recover
   follow_heat: !input follow_heat
   debug_logbook: !input debug_logbook
   dwell_minutes: !input dwell_minutes
@@ -629,14 +650,13 @@ variables:
       {% set st = states[c] %}
       {% set temp = state_attr(c, 'current_temperature') %}
       {% set target = state_attr(c, 'temperature') %}
-      {# A state changed by a person inside Home Assistant carries their
-         user_id; a service call from an automation never does. So this leaves
-         alone anything you set yourself, and still recovers what this
-         automation left behind. A change from the remote control or the MHI
-         app arrives by polling with an empty context, and cannot be told
-         apart from ours. #}
+      {# There is no way to tell here who set fan mode. A state carries the
+         caller's context for five seconds only - Entity.CONTEXT_RECENT_TIME_
+         SECONDS - and every poll after that rewrites it with an empty one. By
+         the time a unit qualifies as stranded the marker is long gone. Use the
+         exemption list below instead. #}
       {% if recover_fan and st is not none and st.state == 'fan_only'
-            and (st.context is none or st.context.user_id is none)
+            and c not in never_recover
             and temp is number and target is number
             and (now() - st.last_changed).total_seconds() / 60
                 > relax_minutes | int + settle_minutes %}
