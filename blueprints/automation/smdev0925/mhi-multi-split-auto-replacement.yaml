@@ -22,7 +22,10 @@
 # Changing a mode yourself. A change between cooling and heating, from anywhere,
 # triggers the automation directly rather than waiting for the five-minute check,
 # and skips the settle time when nothing holds the compressor. A unit that is
-# running keeps it; the change waits its turn.
+# running keeps it; the change waits its turn. The same holds for a change this
+# automation makes itself: the run it triggers is queued behind the one that
+# made it, so a unit turned at its limit gets the outdoor unit within the fan
+# time when nothing else is calling.
 #
 # Recovery. If a stand-down cannot finish - the unit drops off the network, or
 # Home Assistant restarts - the unit stays in fan mode and the mode rules ignore
@@ -69,9 +72,9 @@
 # The Compressor Demand bit drops between compressor cycles, so a unit halfway
 # through a job reads as finished.
 #
-# WHY THE FAN TIME IS TWO MINUTES AND NOT THE RESOLVER'S FOUR
+# WHY THE FAN TIME IS TEN SECONDS AND NOT THE RESOLVER'S FOUR MINUTES
 # The mode lockout resolver holds a unit in fan mode long enough to drop its
-# AUTO latch. No unit here is in AUTO, so there is no latch. Two minutes only
+# AUTO latch. No unit here is in AUTO, so there is no latch. The fan time only
 # has to cover the outdoor unit releasing and selecting a side again, which on a
 # four-unit SCM80 happens within seconds of the modes changing. [HW]
 #
@@ -93,7 +96,7 @@
 # its sensor reads that warm air. A unit locked out is treated no differently
 # from one in fan. Two consequences: fan mode does not give an honest reading
 # during heating, which is why nothing here parks a unit in fan; and a
-# stand-down is not free, because those two minutes put heat into those rooms.
+# stand-down is not free, because the fan time puts heat into those rooms.
 # The 78 % rest value and the ~38 % load value agree with the integration's own
 # operating-data table. EEV Position is relative, not calibrated.
 #
@@ -119,7 +122,7 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.9.9** — 21 September 2026
+    **Version 0.9.10** — 21 September 2026
 
 
     To keep this up to date automatically, install
@@ -276,13 +279,13 @@ blueprint:
           name: Time in fan mode
           description: >-
             How long the units wait in fan mode while the outdoor unit changes
-            side. Two minutes is proven on a four-unit SCM80. Increase it if the
+            side. Ten seconds is proven on a four-unit SCM80. Increase it if the
             waiting side does not start, but keep it short: a unit in fan mode
             warms its own room while the system is heating.
           default:
             hours: 0
-            minutes: 2
-            seconds: 0
+            minutes: 0
+            seconds: 10
           selector:
             duration:
     warm_air:
@@ -399,7 +402,19 @@ blueprint:
               unit_of_measurement: minutes
               mode: box
 
-mode: single
+# Queued, one deep. A mode change written by this automation publishes the new
+# state during the service call, so its mode_changed trigger arrives while this
+# run is still going. Under mode: single it was dropped without a word, and the
+# handover to the other side waited for the settle time and the next five-minute
+# run - 7 to 12 minutes. Queued, it runs straight after, and `immediate` hands
+# the outdoor unit over at once when nothing is calling.
+#
+# Runs never overlap: a queued run starts only when the one before has ended.
+# One deep is enough - a second trigger inside the same run is dropped, and the
+# five-minute run catches up. A stand-down writes fan_only, which the trigger
+# does not match, so a stand-down cannot queue another.
+mode: queued
+max: 2
 max_exceeded: silent
 
 trace:
@@ -432,7 +447,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.9.9"
+  version: "0.9.10"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
@@ -464,7 +479,9 @@ variables:
       {%- set secs = (relax_delay.hours | default(0) | int) * 3600
                    + (relax_delay.minutes | default(0) | int) * 60
                    + (relax_delay.seconds | default(0) | int) -%}
-      {{- secs // 60 }}m{{ ' ' ~ secs % 60 ~ 's' if secs % 60 else '' }}
+      {{- (secs // 60 ~ 'm' if secs >= 60 else '')
+          ~ (' ' if secs >= 60 and secs % 60 else '')
+          ~ (secs % 60 ~ 's' if secs % 60 else '') }}
     {%- else -%}
       {{- relax_delay }}
     {%- endif -%}
@@ -653,8 +670,8 @@ variables:
   #
   # The time test is what separates a stranded unit from one in the middle of a
   # stand-down: longer in fan mode than the fan time plus the settle time. The
-  # automation is mode: single, so a stand-down cannot be running while this is
-  # evaluated, but the margin costs nothing.
+  # automation is queued, so runs never overlap and a stand-down cannot be
+  # running while this is evaluated, but the margin costs nothing.
   stranded: >-
     {% set ns = namespace(items=[]) %}
     {% for c in climate_entities %}
@@ -875,7 +892,9 @@ actions:
         value_template: "{{ ready }}"
     then:
       # One run does one task. A mode change is first. The lockout check then
-      # waits for the next run, when the new modes are in the state.
+      # waits for the next run, when the new modes are in the state. That next
+      # run is normally the one queued by the mode change itself, directly
+      # after this one.
       - choose:
           # First. A stranded unit is doing nothing for its room and the mode
           # rules cannot see it, so it stays stranded until this puts it back.

@@ -33,7 +33,7 @@ who use them on their own systems.
   into a room that did not ask for it. A debug switch writes every decision, and
   the reason for it, to the logbook. **Use this blueprint or the resolver on a
   unit, never both — they deadlock each other.** Proven on a four-head SCM80: the
-  stand-down with its two-minute fan time, the restore and the handover; the
+  stand-down with its ten-second fan time, the restore and the handover; the
   idle-units option; and the immediate response to a mode changed by hand.
   **The mode-change rules themselves — a unit turning around at its own limit —
   have still not been seen to fire on hardware**, nor has a genuine recovery
