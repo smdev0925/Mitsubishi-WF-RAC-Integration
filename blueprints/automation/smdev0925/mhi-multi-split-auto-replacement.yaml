@@ -129,7 +129,7 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.10.1** — 21 September 2026
+    **Version 0.10.2** — 21 September 2026
 
 
     To keep this up to date automatically, install
@@ -329,17 +329,13 @@ blueprint:
       icon: mdi:backup-restore
       collapsed: true
       description: >-
-        A stand-down puts a unit in fan mode for a couple of minutes and then
-        puts it back. If that second step cannot happen - the unit drops off the
-        network, or Home Assistant restarts - the unit stays in fan mode and
-        nothing brings it back.
+        The rules ignore a unit in fan mode. Recovery puts it back into heating
+        or cooling - for example after a stand-down that could not finish.
       input:
         never_recover:
           name: Units to leave in fan mode
           description: >-
-            Units listed here are never recovered, so you can park one in fan
-            mode and it stays there. Leave empty to recover any unit found in
-            fan mode.
+            These units stay in fan mode. Recovery never changes them.
           default: []
           selector:
             entity:
@@ -351,15 +347,13 @@ blueprint:
         recover_fan:
           name: Recover units left in fan mode
           description: >-
-            Put a unit that has been left in fan mode back into the mode the
-            compressor is running in. If nothing is running, whatever the rest of
-            the group agrees on; if the group is split too, the unit's own room
-            against its setpoint.
+            A unit that stays in fan mode for longer than the fan time plus the
+            settle time goes back into the mode that is running now. If nothing
+            is running, it goes into the mode of the other units.
 
 
-            **It cannot tell who set fan mode**, so while this is on, any unit
-            found in fan mode is recovered. To park one in fan, add it to the
-            list above, or use `off` or `auto` instead.
+            **This includes a unit you set to fan mode yourself.** To keep a
+            unit in fan mode, add it to the list above.
           default: false
           selector:
             boolean:
@@ -458,7 +452,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.10.1"
+  version: "0.10.2"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
@@ -1026,12 +1020,10 @@ actions:
                 data:
                   name: MHI AUTO Replacement
                   message: >-
-                    v{{ version }} — recovering
-                    {% for f in stranded %}{{ f.entity | replace('climate.', '') }},
-                    left in fan mode {{ f.mins }}m ago, back to {{ f.want }}
-                    (room {{ f.temp }}°C, setpoint {{ f.target }}°C){{ "; " if not loop.last }}{% endfor %}.
-                    A stand-down could not finish, most likely because the unit
-                    was unreachable.
+                    v{{ version }} —
+                    {% for f in stranded %}{{ f.entity | replace('climate.', '') }}
+                    was in fan mode for {{ f.mins | round(0) | int }}m, back to
+                    {{ f.want }}{{ "; " if not loop.last }}{% endfor %}.
               - repeat:
                   for_each: "{{ stranded }}"
                   sequence:
