@@ -18,13 +18,18 @@
 # makes a warm room warmer. So the option does two things. A unit that changes
 # from heating to cooling takes the outdoor unit at once: the heating side is
 # stood down even while it is calling, and the cooldown does not apply. And
-# when heating has the outdoor unit, or is about to take it, every unit in
-# cooling goes to heating together, where it settles, closes its louvres and
-# stops its fan. A room that then gets too warm turns back to cooling at its
+# while heating runs, every unit in cooling goes to heating together, where it
+# settles, closes its louvres and stops its fan. When nothing runs, every unit
+# keeps its mode, so heating does not become the default. A room that then gets too warm turns back to cooling at its
 # Heating Limit, and the first part gives it the outdoor unit at once. It needs
 # Lockout protection. The input key is still `follow_heat`, from when this was
 # "Idle units in heating", so that the setting of an existing automation carries
 # over; a new key would silently read as off.
+#
+# Turns. A room on the waiting side that leaves its band - the same edges as
+# the rules - takes the outdoor unit even while the other side is calling, once
+# the side that runs has had the cooldown. Without it, a unit whose compressor
+# restarts inside the release grace kept the outdoor unit for ever. [off-line]
 #
 # Changing a mode yourself. A change between cooling and heating, from anywhere,
 # triggers the automation directly rather than waiting for the five-minute check,
@@ -129,7 +134,7 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.10.2** — 21 September 2026
+    **Version 0.10.4** — 21 September 2026
 
 
     To keep this up to date automatically, install
@@ -240,6 +245,12 @@ blueprint:
           description: >-
             On a multi-split, resolve the lockout when two units ask for opposite
             modes. Leave it off on a single split.
+
+
+            A waiting room that leaves its band - below setpoint minus the
+            Cooling Limit, or above setpoint plus the Heating Limit - takes the
+            outdoor unit even while the other side runs. Each side keeps it for
+            at least the cooldown.
           default: false
           selector:
             boolean:
@@ -452,7 +463,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.10.2"
+  version: "0.10.4"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
@@ -546,6 +557,7 @@ variables:
              'held': want != mode and dwell < dwell_minutes,
              'calling': d is not none and (d.state == 'on'
                         or (d.state == 'off' and since < release_grace_minutes)),
+             'on': d is not none and d.state == 'on',
              'since': since | round(1),
              'after': want if (want != mode and dwell >= dwell_minutes) else mode,
              'temp': temp,
@@ -624,6 +636,21 @@ variables:
     {{ 'heat' if last_served == 'cool'
        else 'cool' if last_served == 'heat' else 'none' }}
 
+  # A room on the waiting side needs its mode: below its setpoint for heating,
+  # above it for cooling. Dry always wants cooling. Without this, a satisfied
+  # unit on each side made a lockout out of nothing, and the side that ran last
+  # was stood down every cooldown for a side that did not want the outdoor
+  # unit. [off-line, S7]
+  waiting_needs: >-
+    {% set ns = namespace(n=0) %}
+    {% for f in fleet if f.mode == waiting_side %}
+      {% if (waiting_side == 'heat' and f.temp < f.target)
+            or (waiting_side == 'cool' and f.temp > f.target) %}
+        {% set ns.n = ns.n + 1 %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.n > 0 or (waiting_side == 'cool' and dry_heads | count > 0) }}
+
   # The units that change to fan mode: all units on the side that operated last.
   # Fan mode removes the demand that holds the outdoor unit.
   standdown: "{{ fleet | selectattr('mode', 'eq', last_served) | list }}"
@@ -645,7 +672,7 @@ variables:
   lockout_ready: >-
     {{ lockout_protection and conflict and in_use | count == 0
        and last_served in ['cool', 'heat'] and standdown | count > 0
-       and cooldown_passed }}
+       and waiting_needs and cooldown_passed }}
 
   # The fan time in whole minutes, for the recovery test below.
   relax_minutes: >-
@@ -659,9 +686,63 @@ variables:
 
   # Which way the outdoor unit is running now: the mode of whichever unit holds
   # the compressor. Nothing running means no direction.
+  #
+  # The units whose demand is on right now come first. Only if none is on do
+  # the units inside their release grace decide. Until 0.10.4 both counted
+  # together and heating won a tie, so a heating unit whose demand had stopped
+  # minutes ago made "heating" the direction while cooling ran.
   direction: >-
-    {% set m = in_use | map(attribute='mode') | list %}
+    {% set r = fleet | selectattr('on') | map(attribute='mode') | list %}
+    {% set m = r if r | count > 0 else in_use | map(attribute='mode') | list %}
     {{ 'heat' if 'heat' in m else 'cool' if 'cool' in m else 'none' }}
+
+  # --- a room outside its band gets its turn ---------------------------------
+  # A unit that is calling keeps the outdoor unit, and a unit whose compressor
+  # starts again inside the release grace never stops calling. So one side could
+  # keep the outdoor unit for hours while the other side's rooms drifted without
+  # limit. [off-line, P7: the office cooled for six hours, the other rooms fell
+  # to 14 °C]
+  #
+  # A room on the waiting side that has left its band therefore takes the
+  # outdoor unit, even while the other side calls. The band edges are the same
+  # as the rules: a heating room at or below setpoint - Cooling Limit, a cooling
+  # room at or above setpoint + Heating Limit. No new setting. The edges are far
+  # enough apart that turns are long; the setpoint itself would change the
+  # direction every cooldown, and the compressor runs hard for about 15 minutes
+  # after each change.
+  starved: >-
+    {% set ns = namespace(items=[]) %}
+    {% for f in fleet if direction in ['cool', 'heat']
+                        and f.mode != direction and not f.calling %}
+      {% if (f.mode == 'heat' and f.temp <= f.target - cool_limit)
+            or (f.mode == 'cool' and f.temp >= f.target + heat_limit) %}
+        {% set ns.items = ns.items + [f] %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.items }}
+
+  # The units that hold the outdoor unit now.
+  force_standdown: "{{ fleet | selectattr('mode', 'eq', direction) | list }}"
+
+  # The shortest turn is the cooldown. The stand-down that started this turn
+  # reset the dwell of the units that now wait, so while any of them changed mode
+  # inside the cooldown, the side that runs keeps its turn.
+  turn_passed: >-
+    {% set d = fleet | rejectattr('mode', 'eq', direction)
+                     | map(attribute='dwell') | list %}
+    {{ d | count == 0 or d | min >= cooldown_minutes }}
+
+  force_ready: >-
+    {{ lockout_protection and not lockout_ready and starved | count > 0
+       and force_standdown | count > 0 and turn_passed }}
+
+  # One handover, for both reasons: a lockout with nothing running, or a room
+  # outside its band.
+  ho_ready: "{{ lockout_ready or force_ready }}"
+  ho_from: "{{ last_served if lockout_ready else direction }}"
+  ho_to: "{{ 'heat' if ho_from == 'cool' else 'cool' }}"
+  ho_units: "{{ standdown if lockout_ready else force_standdown }}"
+  ho_blocked_by_dry: "{{ ho_from == 'cool' and dry_heads | count > 0 }}"
 
   # What a stranded unit goes back to when the compressor is not running:
   # whatever the rest of the group agrees on, and if the group is split too,
@@ -713,16 +794,20 @@ variables:
     {% endfor %}
     {{ ns.items }}
 
-  # Units to move out of cooling while heating has, or is about to take, the
-  # outdoor unit - so they stop drawing air over a warm coil. Only ever into
-  # heating: in cooling the valves of the idle units shut, nothing to fix.
-  # Part two of Cooling priority: all units in cooling go together.
+  # Units to move out of cooling while heating runs - so they stop drawing air
+  # over a warm coil. Only ever into heating: in cooling the valves of the idle
+  # units shut and a satisfied unit in cooling keeps its fan running, so moving
+  # heating units the other way would only add fans. Part two of Cooling
+  # priority: all units in cooling go together.
   #
-  # 'direction is none' is included because a unit set to heating by hand while
-  # the system is idle has no direction yet. Without it this branch could not run
-  # on such a change, and the lockout branch sent three idle units to fan mode
-  # for two minutes and put them straight back into cooling - recreating the very
-  # conflict that this branch then resolved on a later run.
+  # Only while a heating unit is actually calling. Until 0.10.3 this also ran
+  # when nothing was running and any unit was in heating, so every satisfied
+  # cooling room fell back to heating and only cooled again at its Heating
+  # Limit - heating became the default. With nothing running, nothing blows
+  # warm air, so every unit now keeps its mode. The case that clause was for -
+  # a unit set to heating by hand while the system is idle - is handled by the
+  # lockout: it stands the cooling side down when that room needs heat, heating
+  # starts, and this branch then moves the cooling units.
   #
   # Until 0.10.0 only a room at or below its setpoint was moved, and a warmer
   # room kept cooling and its claim. With Cooling priority that claim is not
@@ -737,8 +822,7 @@ variables:
     {% set ns = namespace(items=[]) %}
     {% for f in fleet %}
       {% if follow_heat and f.mode == 'cool'
-            and (direction == 'heat'
-                 or (direction == 'none' and heating_votes | count > 0))
+            and direction == 'heat'
             and not f.calling and f.dwell >= dwell_minutes
             and f.temp < f.target + heat_limit %}
         {% set ns.items = ns.items + [f] %}
@@ -807,7 +891,7 @@ variables:
   # Everything that has to be true before the automation writes anything.
   ready: >-
     {{ priority_ready
-       or ((stranded | count > 0 or changes | count > 0 or lockout_ready
+       or ((stranded | count > 0 or changes | count > 0 or ho_ready
             or follow_targets | count > 0)
            and (settle_passed or immediate)) }}
 
@@ -850,7 +934,7 @@ variables:
       {{ priority_standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
       {{ 'stands' if priority_standdown | count == 1 else 'stand' }} down now
     {%- elif not settle_passed and not immediate
-           and (stranded | count > 0 or changes | count > 0 or lockout_ready
+           and (stranded | count > 0 or changes | count > 0 or ho_ready
                 or follow_targets | count > 0) -%}
       WAIT settle - there is something to do, but a unit changed mode less than
       {{ settle_minutes }}m ago and may not have reported its new state yet
@@ -869,10 +953,16 @@ variables:
       and heating {{ 'has' if direction == 'heat' else 'is waiting for' }} the
       outdoor unit, so {{ 'it goes' if follow_targets | count == 1 else 'they go' }}
       to heating together{{ hold }}
-    {%- elif lockout_ready and blocked_by_dry -%}
+    {%- elif ho_ready and ho_blocked_by_dry -%}
       HELD lockout blocked by dry:
       {{ dry_heads | map('replace', 'climate.', '') | join(', ') }}
       votes cooling and is never written to{{ hold }}
+    {%- elif force_ready -%}
+      ACT turn:
+      {{ starved | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
+      {{ 'is' if starved | count == 1 else 'are' }} outside the band while
+      {{ direction }} runs, so stand down
+      {{ force_standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}{{ hold }}
     {%- elif lockout_ready -%}
       ACT lockout: stand down
       {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
@@ -888,6 +978,11 @@ variables:
       ({{ 'cooling' if cooling_votes | count > 0 else 'heating' }})
     {%- elif not lockout_protection -%}
       IDLE units request opposite modes, but Lockout protection is off{{ hold }}
+    {%- elif lockout_protection and starved | count > 0 and not turn_passed -%}
+      IDLE
+      {{ starved | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
+      {{ 'is' if starved | count == 1 else 'are' }} outside the band, but the
+      {{ direction }} side has had less than its {{ cooldown_minutes }}m turn{{ hold }}
     {%- elif in_use | count > 0 -%}
       IDLE lockout, but
       {{ in_use | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
@@ -900,6 +995,9 @@ variables:
       device as their climate entity.{{ hold }}
     {%- elif standdown | count == 0 -%}
       IDLE lockout, but there is nothing to stand down{{ hold }}
+    {%- elif not waiting_needs -%}
+      IDLE units in both modes, but no room on the {{ waiting_side }} side
+      needs it, so {{ last_served }} keeps the outdoor unit{{ hold }}
     {%- elif not cooldown_passed -%}
       IDLE lockout, but
       {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
@@ -1131,16 +1229,16 @@ actions:
                           data:
                             hvac_mode: heat
 
-          - alias: Resolve a lockout
+          - alias: Hand the outdoor unit over - a lockout, or a room outside its band
             conditions:
               - condition: template
-                value_template: "{{ lockout_ready }}"
+                value_template: "{{ ho_ready }}"
             sequence:
               - choose:
                   - alias: Dry holds the cooling side
                     conditions:
                       - condition: template
-                        value_template: "{{ blocked_by_dry }}"
+                        value_template: "{{ ho_blocked_by_dry }}"
                     sequence:
                       - action: logbook.log
                         data:
@@ -1159,11 +1257,23 @@ actions:
                     data:
                       name: MHI AUTO Replacement
                       message: >-
-                        v{{ version }} — the {{ last_served }} side operated
-                        last. Change
-                        {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
-                        to fan mode for {{ fan_time }}. The {{ waiting_side }}
+                        v{{ version }} —
+                        {% if force_ready -%}
+                        {% for f in starved %}{{ f.entity | replace('climate.', '') }}
+                        ({{ f.temp }}°C, setpoint {{ f.target }}°C){{ ", " if not loop.last }}{% endfor %}
+                        {{ 'is' if starved | count == 1 else 'are' }} outside
+                        {{ 'its' if starved | count == 1 else 'their' }} band while
+                        {{ ho_from }} runs.
+                        {%- else -%}
+                        the {{ ho_from }} side operated last.
+                        {%- endif %} Change
+                        {{ ho_units | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
+                        to fan mode for {{ fan_time }}. The {{ ho_to }}
                         side can then operate.
+                        {%- if follow_heat and ho_to == 'heat' %}
+                        Cooling priority: after that they go to heating
+                        together, not back to cooling.
+                        {%- endif %}
                         Units: {% for f in fleet %}{{ f.entity | replace('climate.', '') }}
                         [{{ f.mode }} call={{ 'Y' if f.calling else 'N' }}
                         quiet={{ f.since }}m {{ f.temp }}/{{ f.target }}C]{{ ", " if not loop.last }}{% endfor %}
@@ -1172,7 +1282,7 @@ actions:
                     action: climate.set_hvac_mode
                     continue_on_error: true
                     target:
-                      entity_id: "{{ standdown | map(attribute='entity') | list }}"
+                      entity_id: "{{ ho_units | map(attribute='entity') | list }}"
                     data:
                       hvac_mode: fan_only
 
@@ -1181,12 +1291,20 @@ actions:
 
                   - alias: Put each unit back to its mode
                     repeat:
-                      for_each: "{{ standdown }}"
+                      for_each: "{{ ho_units }}"
                       sequence:
                         # Write only if the unit is still in fan mode. If you changed
                         # the mode during the delay, your mode stays. A command that
                         # makes no change also holds the module for approximately one
                         # minute.
+                        #
+                        # With Cooling priority, a handover to heating puts the
+                        # cooling side into heating rather than back into cooling.
+                        # Back in cooling it would wait there while heating runs -
+                        # fan over a warm coil - and the stand-down would have reset
+                        # its dwell, so part two could not move it for another full
+                        # dwell. [off-line, P3: 25 minutes] Same guard as part two: a
+                        # room already at its Heating Limit goes back to cooling.
                         - if:
                             - condition: template
                               value_template: "{{ states(repeat.item.entity) == 'fan_only' }}"
@@ -1196,5 +1314,8 @@ actions:
                               target:
                                 entity_id: "{{ repeat.item.entity }}"
                               data:
-                                hvac_mode: "{{ repeat.item.mode }}"
+                                hvac_mode: >-
+                                  {{ 'heat' if follow_heat and ho_to == 'heat'
+                                     and repeat.item.temp < repeat.item.target + heat_limit
+                                     else repeat.item.mode }}
 
