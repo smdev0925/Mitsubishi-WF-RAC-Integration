@@ -48,6 +48,12 @@
 # Offset on the device, or a separate room sensor given to the integration,
 # corrects it.
 #
+# A room sensor given to the integration is rounded to the 0.25 °C protocol
+# grid before the blueprint sees it, so 24.1 on the thermostat reads 24.0 here.
+# The rules therefore test "at or past" a limit (<=, >=), not "strictly past",
+# or a unit would wait for the next step and turn late. The cost: a limit of
+# 24.0 can now be reached at about 23.9 on the thermostat.
+#
 # Debug. One logbook entry per run with the decision and the readings behind it.
 # It changes no behaviour and needs no helper. About 288 entries a day, more now
 # that a mode change also triggers a run.
@@ -113,7 +119,7 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.9.8** — 14 September 2026
+    **Version 0.9.9** — 21 September 2026
 
 
     To keep this up to date automatically, install
@@ -426,7 +432,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.9.8"
+  version: "0.9.9"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
@@ -492,8 +498,13 @@ variables:
       {% if mode in ['cool', 'heat'] and temp is number and target is number %}
         {# Each rule operates in one direction. A unit that cools in a warm room
            is correct, and so is a unit that heats in a cold room. #}
-        {% set want = 'heat' if mode == 'cool' and temp < target - cool_limit
-                 else 'cool' if mode == 'heat' and temp > target + heat_limit
+        {# At or past the limit, not strictly past it. With a room sensor
+           given to the integration, current_temperature is that sensor
+           rounded to the 0.25 °C protocol grid, so 24.1 arrives as 24.0.
+           A strict test then waits for the next step, 24.25, and the unit
+           turns late. #}
+        {% set want = 'heat' if mode == 'cool' and temp <= target - cool_limit
+                 else 'cool' if mode == 'heat' and temp >= target + heat_limit
                  else mode %}
         {% set dwell = (now() - s.last_changed).total_seconds() / 60 %}
         {% set dev = device_id(c) %}
