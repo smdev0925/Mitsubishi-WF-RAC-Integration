@@ -19,9 +19,13 @@
 # from heating to cooling takes the outdoor unit at once: the heating side is
 # stood down even while it is calling, and the cooldown does not apply. And
 # while heating runs, every unit in cooling goes to heating together, where it
-# settles, closes its louvres and stops its fan. When nothing runs, every unit
-# keeps its mode, so heating does not become the default. A room that then gets too warm turns back to cooling at its
-# Heating Limit, and the first part gives it the outdoor unit at once. It needs
+# settles, closes its louvres and stops its fan. When nothing runs, no unit is
+# moved. A moved unit stays in heating after the heating stops: it turns back
+# to cooling only at its Heating Limit, and the first part then gives it the
+# outdoor unit at once. Heating units are never moved while cooling runs, so
+# heating comes back at the setpoint and cooling only at the band edge. Undoing
+# the move when heating stops would need a helper to remember which units were
+# moved; a blueprint cannot create one, and it was declined. It needs
 # Lockout protection. The input key is still `follow_heat`, from when this was
 # "Idle units in heating", so that the setting of an existing automation carries
 # over; a new key would silently read as off.
@@ -134,7 +138,7 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.10.4** — 21 September 2026
+    **Version 0.10.5** — 21 September 2026
 
 
     To keep this up to date automatically, install
@@ -324,10 +328,17 @@ blueprint:
             if they are running, and then go back to heating.
 
 
-            When heating takes the outdoor unit, all units in cooling change to
-            heating together. A unit that is satisfied in heating closes its
-            louvres and stops its fan. A room that gets too warm changes back to
-            cooling at its Heating Limit and takes the outdoor unit at once.
+            While heating runs, all units in cooling change to heating together.
+            A unit that is satisfied in heating closes its louvres and stops its
+            fan.
+
+
+            **The cost: cooling comes back later than heating.** A unit moved to
+            heating stays in heating when the heating stops. It changes back to
+            cooling only when its room reaches setpoint + Heating Limit, and then
+            takes the outdoor unit at once. Units in heating are not moved while
+            cooling runs, so a heating room gets heating again at its setpoint
+            as soon as cooling stops.
 
 
             Needs Lockout protection.
@@ -463,7 +474,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.10.4"
+  version: "0.10.5"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
