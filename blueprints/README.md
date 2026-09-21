@@ -27,17 +27,21 @@ who use them on their own systems.
   limitation. Optional lockout protection resolves the split this creates on a
   multi-split, using the rules of the resolver above but without needing a
   Cool/Heat Status sensor, because no unit is in AUTO and a unit's mode is its
-  request. A second option deals with the indoor expansion valves staying open
-  while the outdoor unit heats: a unit parked in cooling is moved to heating so
-  it settles, closes its louvres and stops its fan, rather than blowing warm air
-  into a room that did not ask for it. A debug switch writes every decision, and
+  request. A second option, Cooling priority, deals with the indoor expansion
+  valves staying open while the outdoor unit heats: a unit that changes to
+  cooling takes the outdoor unit at once, even from a heating unit that is
+  running, and when heating takes over, every unit in cooling goes to heating
+  together, so it settles, closes its louvres and stops its fan rather than
+  blowing warm air into its room. A debug switch writes every decision, and
   the reason for it, to the logbook. **Use this blueprint or the resolver on a
   unit, never both — they deadlock each other.** Proven on a four-head SCM80: the
   stand-down with its ten-second fan time, the restore and the handover; the
-  idle-units option; and the immediate response to a mode changed by hand.
-  **The mode-change rules themselves — a unit turning around at its own limit —
-  have still not been seen to fire on hardware**, nor has a genuine recovery
-  from a stranded unit, nor the dry block.
+  idle-units part of Cooling priority (before 0.10.0 it moved only rooms at or
+  below their setpoint); the immediate response to a mode changed by hand; and
+  one unit turning from heating to cooling at its own limit. **Cooling
+  priority's stand-down of a running heating side is off-line-tested only.**
+  **The cooling-to-heating rule has still not been seen to fire on hardware**,
+  nor has a genuine recovery from a stranded unit, nor the dry block.
 
 ## Why they live here and not in the integration
 

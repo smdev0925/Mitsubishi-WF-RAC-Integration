@@ -13,11 +13,18 @@
 # needs the Compressor Demand sensors. Leave it off on a single split. A unit in
 # dry is the one thing it cannot move: dry votes cooling and is never written to.
 #
-# Idle units in heating. While the outdoor unit heats, every indoor valve stays
-# open, so a unit parked in cooling draws air over a warm coil. The option moves
-# a unit that has nothing left to do - room at or below its setpoint - into
-# heating, where it settles, closes its louvres and stops its fan. A room above
-# its setpoint still wants cooling and is left alone, keeping its claim.
+# Cooling priority. While the outdoor unit heats, every indoor valve stays open,
+# so a unit that asks for cooling and has to wait draws air over a warm coil and
+# makes a warm room warmer. So the option does two things. A unit that changes
+# from heating to cooling takes the outdoor unit at once: the heating side is
+# stood down even while it is calling, and the cooldown does not apply. And
+# when heating has the outdoor unit, or is about to take it, every unit in
+# cooling goes to heating together, where it settles, closes its louvres and
+# stops its fan. A room that then gets too warm turns back to cooling at its
+# Heating Limit, and the first part gives it the outdoor unit at once. It needs
+# Lockout protection. The input key is still `follow_heat`, from when this was
+# "Idle units in heating", so that the setting of an existing automation carries
+# over; a new key would silently read as off.
 #
 # Changing a mode yourself. A change between cooling and heating, from anywhere,
 # triggers the automation directly rather than waiting for the five-minute check,
@@ -122,7 +129,7 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.9.10** — 21 September 2026
+    **Version 0.10.0** — 21 September 2026
 
 
     To keep this up to date automatically, install
@@ -289,26 +296,30 @@ blueprint:
           selector:
             duration:
     warm_air:
-      name: Idle units in heating
-      icon: mdi:weather-windy
+      name: Cooling priority
+      icon: mdi:snowflake-alert
       collapsed: true
       description: >-
         While the outdoor unit is heating, the expansion valve of every indoor
-        unit stays open, so a unit that cannot cool still draws air over a warm
-        coil and blows it into its room. In cooling the valves shut and this does
-        not happen.
+        unit stays open, so a unit that waits for cooling still draws air over a
+        warm coil and blows it into a room that is already too warm. In cooling
+        the valves shut and this does not happen.
       input:
         follow_heat:
-          name: Put idle units into heating
+          name: Cooling priority
           description: >-
-            While the outdoor unit is heating, change a unit that is in cooling
-            into heating - but only one that has nothing left to do, meaning its
-            room is at or below its setpoint. It closes its louvres and stops its
-            fan instead of blowing warm air into the room.
+            A unit that changes from heating to cooling takes the outdoor unit
+            at once. The units in heating go to fan mode for the fan time, even
+            if they are running, and then go back to heating.
 
 
-            A room above its setpoint still wants cooling, so it is left in
-            cooling and keeps its claim on the outdoor unit.
+            When heating takes the outdoor unit, all units in cooling change to
+            heating together. A unit that is satisfied in heating closes its
+            louvres and stops its fan. A room that gets too warm changes back to
+            cooling at its Heating Limit and takes the outdoor unit at once.
+
+
+            Needs Lockout protection.
           default: false
           selector:
             boolean:
@@ -447,7 +458,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.9.10"
+  version: "0.10.0"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
@@ -703,6 +714,7 @@ variables:
   # Units to move out of cooling while heating has, or is about to take, the
   # outdoor unit - so they stop drawing air over a warm coil. Only ever into
   # heating: in cooling the valves of the idle units shut, nothing to fix.
+  # Part two of Cooling priority: all units in cooling go together.
   #
   # 'direction is none' is included because a unit set to heating by hand while
   # the system is idle has no direction yet. Without it this branch could not run
@@ -710,17 +722,15 @@ variables:
   # for two minutes and put them straight back into cooling - recreating the very
   # conflict that this branch then resolved on a later run.
   #
-  # The last test is the important one: the room must be at or below its
-  # setpoint, so the unit has no cooling left to do. A room above its setpoint
-  # wants cooling, and it keeps its mode so that it keeps its claim on the
-  # outdoor unit and the rotation gives it a turn.
+  # Until 0.10.0 only a room at or below its setpoint was moved, and a warmer
+  # room kept cooling and its claim. With Cooling priority that claim is not
+  # needed: a room that gets too warm in heating turns back at its Heating Limit
+  # and takes the outdoor unit at once. Waiting in cooling was the worse place to
+  # be, because the fan runs over a warm coil the whole time.
   #
-  # An earlier version allowed anything up to the setpoint plus the Heating
-  # Limit. That moved rooms that were a full degree above their setpoint and
-  # plainly wanted cooling, and because this branch can act during the release
-  # grace while the rotation cannot, it took their claim away moments before the
-  # rotation would have served them. It also let a room be moved while sitting
-  # exactly on its flip point, so rule 2 turned it straight back.
+  # One test stays: the room must be below its setpoint plus the Heating Limit.
+  # A room already at that point would be turned straight back by rule 2 when
+  # its dwell ended, and would then stand the heating side down again.
   follow_targets: >-
     {% set ns = namespace(items=[]) %}
     {% for f in fleet %}
@@ -728,7 +738,7 @@ variables:
             and (direction == 'heat'
                  or (direction == 'none' and heating_votes | count > 0))
             and not f.calling and f.dwell >= dwell_minutes
-            and f.temp <= f.target %}
+            and f.temp < f.target + heat_limit %}
         {% set ns.items = ns.items + [f] %}
       {% endif %}
     {% endfor %}
@@ -763,11 +773,39 @@ variables:
   immediate: >-
     {{ mode_change_trigger and in_use | count == 0 and settle_others }}
 
+  # --- cooling priority ------------------------------------------------------
+  # This run was started by a unit changing from heating to cooling - by a rule,
+  # by you, the app or the remote - and the unit is still in cooling.
+  cool_request: >-
+    {% set t = trigger | default({}) %}
+    {{ t.get('id', '') == 'mode_changed'
+       and t.from_state.state == 'heat' and t.to_state.state == 'cool'
+       and states(t.entity_id) == 'cool' }}
+
+  # The units that hold the heating side.
+  priority_standdown: "{{ fleet | selectattr('mode', 'eq', 'heat') | list }}"
+
+  # Cooling takes the outdoor unit at once. No settle time and no cooldown, and
+  # a heating unit that is calling does NOT keep the compressor - that is the
+  # whole point. Only when heating has the outdoor unit, or held it last; if
+  # cooling already has it there is nothing to take.
+  #
+  # Only on the trigger, not on the five-minute run: it is the change to cooling
+  # that has priority, not every unit in cooling. If the trigger is lost - two
+  # units changed in one run and the queue was full - the normal rotation
+  # serves the unit instead.
+  priority_ready: >-
+    {{ follow_heat and lockout_protection and cool_request
+       and priority_standdown | count > 0
+       and (direction == 'heat'
+            or (direction == 'none' and last_served == 'heat')) }}
+
   # Everything that has to be true before the automation writes anything.
   ready: >-
-    {{ (stranded | count > 0 or changes | count > 0 or lockout_ready
-        or follow_targets | count > 0)
-       and (settle_passed or immediate) }}
+    {{ priority_ready
+       or ((stranded | count > 0 or changes | count > 0 or lockout_ready
+            or follow_targets | count > 0)
+           and (settle_passed or immediate)) }}
 
   # --- what the trace shows ---------------------------------------------------
   # These two change nothing. They exist so that a run which stops at the
@@ -802,7 +840,12 @@ variables:
                    if held | count > 0 else '' -%}
     {%- set now_note = '  (a mode was changed from outside and nothing holds the compressor, so the settle time is skipped)'
                        if immediate else '' -%}
-    {%- if not settle_passed and not immediate
+    {%- if priority_ready -%}
+      ACT cooling priority:
+      {{ trigger.entity_id | replace('climate.', '') }} changed to cooling, so
+      {{ priority_standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
+      {{ 'stands' if priority_standdown | count == 1 else 'stand' }} down now
+    {%- elif not settle_passed and not immediate
            and (stranded | count > 0 or changes | count > 0 or lockout_ready
                 or follow_targets | count > 0) -%}
       WAIT settle - there is something to do, but a unit changed mode less than
@@ -818,10 +861,10 @@ variables:
     {%- elif follow_targets | count > 0 -%}
       ACT
       {{ follow_targets | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
-      {{ 'has' if follow_targets | count == 1 else 'have' }} no cooling left to do
+      {{ 'is' if follow_targets | count == 1 else 'are' }} in cooling
       and heating {{ 'has' if direction == 'heat' else 'is waiting for' }} the
       outdoor unit, so {{ 'it goes' if follow_targets | count == 1 else 'they go' }}
-      to heating{{ hold }}
+      to heating together{{ hold }}
     {%- elif lockout_ready and blocked_by_dry -%}
       HELD lockout blocked by dry:
       {{ dry_heads | map('replace', 'climate.', '') | join(', ') }}
@@ -896,7 +939,59 @@ actions:
       # run is normally the one queued by the mode change itself, directly
       # after this one.
       - choose:
-          # First. A stranded unit is doing nothing for its room and the mode
+          # Before everything, because it is the one task that cannot wait for a
+          # later run: it is started only by the change to cooling, and a later
+          # run no longer knows that the change happened. A stranded unit is
+          # retried on every run, so it loses nothing by going second.
+          - alias: Cooling priority - give the outdoor unit to cooling now
+            conditions:
+              - condition: template
+                value_template: "{{ priority_ready }}"
+            sequence:
+              - action: logbook.log
+                data:
+                  name: MHI AUTO Replacement
+                  message: >-
+                    v{{ version }} — cooling priority.
+                    {{ trigger.entity_id | replace('climate.', '') }} changed to
+                    cooling while heating
+                    {{ 'had' if direction == 'heat' else 'held' }} the outdoor
+                    unit. Change
+                    {{ priority_standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
+                    to fan mode for {{ fan_time }}, so cooling can operate now.
+                    Units: {% for f in fleet %}{{ f.entity | replace('climate.', '') }}
+                    [{{ f.mode }} call={{ 'Y' if f.calling else 'N' }}
+                    {{ f.temp }}/{{ f.target }}C]{{ ", " if not loop.last }}{% endfor %}
+
+              - alias: Change the heating side to fan mode to remove its demand
+                action: climate.set_hvac_mode
+                continue_on_error: true
+                target:
+                  entity_id: "{{ priority_standdown | map(attribute='entity') | list }}"
+                data:
+                  hvac_mode: fan_only
+
+              - alias: Wait for the outdoor unit to change side
+                delay: "{{ relax_delay }}"
+
+              - alias: Put each unit back into heating
+                repeat:
+                  for_each: "{{ priority_standdown }}"
+                  sequence:
+                    # Only if still in fan mode, so a change you made during
+                    # the delay stays.
+                    - if:
+                        - condition: template
+                          value_template: "{{ states(repeat.item.entity) == 'fan_only' }}"
+                      then:
+                        - action: climate.set_hvac_mode
+                          continue_on_error: true
+                          target:
+                            entity_id: "{{ repeat.item.entity }}"
+                          data:
+                            hvac_mode: heat
+
+          # A stranded unit is doing nothing for its room and the mode
           # rules cannot see it, so it stays stranded until this puts it back.
           # It is also the retry: if the unit is still unreachable this fails
           # again, harmlessly, and the next run tries once more.
@@ -988,10 +1083,9 @@ actions:
 
           # Before the stand-down, because when it applies it is the cheaper
           # answer: one command per unit, no fan time, and no warm air blown in
-          # the meantime. It only ever moves units with nothing left to do, so a
-          # room that wants cooling keeps its claim and the stand-down still
-          # handles it on a later run.
-          - alias: Stop idle units blowing warm air while the system heats
+          # the meantime. A room that wants cooling again gets it back through
+          # Cooling priority.
+          - alias: Cooling priority - all units in cooling go to heating together
             conditions:
               - condition: template
                 value_template: "{{ follow_targets | count > 0 }}"
@@ -1003,14 +1097,12 @@ actions:
                     v{{ version }} — the outdoor unit is heating, so
                     {{ follow_targets | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
                     {{ 'goes' if follow_targets | count == 1 else 'go' }} from
-                    cooling to heating.
-                    {{ 'It has' if follow_targets | count == 1 else 'They have' }}
-                    no cooling left to do, so
+                    cooling to heating together. When satisfied,
                     {{ 'it closes its louvres and stops its fan' if follow_targets | count == 1
                        else 'they close their louvres and stop their fans' }}
                     instead of blowing warm air for as long as the system heats.
-                    A room above its setpoint is left in cooling, so it keeps its
-                    claim on the outdoor unit.
+                    A room that gets too warm changes back to cooling at its
+                    Heating Limit and takes the outdoor unit at once.
               - repeat:
                   for_each: "{{ follow_targets }}"
                   sequence:
