@@ -32,9 +32,11 @@ who use them on their own systems.
   cooling takes the outdoor unit at once, even from a heating unit that is
   running, and while heating runs, every unit in cooling goes to heating
   together, so it settles, closes its louvres and stops its fan rather than
-  blowing warm air into its room. With lockout protection on, a waiting room
-  that leaves its band takes the outdoor unit even while the other side runs,
-  so neither side can keep it for hours. A debug switch writes every decision, and
+  blowing warm air into its room. With lockout protection on, the side that
+  ran last keeps the outdoor unit until a waiting room leaves its band; that
+  room then takes it, even while the other side runs, so neither side can keep
+  it for hours. A unit changed by hand between cooling and heating does not wait
+  for its band edge. A debug switch writes every decision, and
   the reason for it, to the logbook. **Use this blueprint or the resolver on a
   unit, never both — they deadlock each other.** Proven on a four-head SCM80: the
   stand-down with its ten-second fan time, the restore and the handover; the

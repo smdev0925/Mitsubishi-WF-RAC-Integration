@@ -22,18 +22,26 @@
 # settles, closes its louvres and stops its fan. When nothing runs, no unit is
 # moved. A moved unit stays in heating after the heating stops: it turns back
 # to cooling only at its Heating Limit, and the first part then gives it the
-# outdoor unit at once. Heating units are never moved while cooling runs, so
-# heating comes back at the setpoint and cooling only at the band edge. Undoing
+# outdoor unit at once. Heating units are never moved while cooling runs; they
+# get the outdoor unit back when one of their rooms leaves its band. Undoing
 # the move when heating stops would need a helper to remember which units were
 # moved; a blueprint cannot create one, and it was declined. It needs
 # Lockout protection. The input key is still `follow_heat`, from when this was
 # "Idle units in heating", so that the setting of an existing automation carries
 # over; a new key would silently read as off.
 #
-# Turns. A room on the waiting side that leaves its band - the same edges as
-# the rules - takes the outdoor unit even while the other side is calling, once
-# the side that runs has had the cooldown. Without it, a unit whose compressor
-# restarts inside the release grace kept the outdoor unit for ever. [off-line]
+# Turns. The side that ran last keeps the outdoor unit until a room on the
+# waiting side leaves its band - the same edges as the rules. That room then
+# takes it, when nothing runs and also while the other side is calling, once the
+# side that runs has had the cooldown. Without the second part, a unit whose
+# compressor restarts inside the release grace kept the outdoor unit for ever.
+# [off-line] The one exception is the unit whose change between cooling and
+# heating started the run: that change is the request, so it counts at once.
+#
+# Until 0.10.5 a waiting room counted when it was past its setpoint by any
+# amount. A lounge 0.2 °C under its setpoint then took the outdoor unit from a
+# cooling room that had just finished, and Cooling priority moved that room to
+# heating, where it stayed until its Heating Limit. [HW]
 #
 # Changing a mode yourself. A change between cooling and heating, from anywhere,
 # triggers the automation directly rather than waiting for the five-minute check,
@@ -138,7 +146,7 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   description: >-
-    **Version 0.10.5** — 21 September 2026
+    **Version 0.10.6** — 22 September 2026
 
 
     To keep this up to date automatically, install
@@ -251,10 +259,12 @@ blueprint:
             modes. Leave it off on a single split.
 
 
-            A waiting room that leaves its band - below setpoint minus the
-            Cooling Limit, or above setpoint plus the Heating Limit - takes the
-            outdoor unit even while the other side runs. Each side keeps it for
-            at least the cooldown.
+            The side that ran last keeps the outdoor unit until a room on the
+            other side leaves its band - setpoint minus the Cooling Limit, or
+            setpoint plus the Heating Limit. That room then takes it, even while
+            the other side runs. Each side keeps it for at least the cooldown.
+            A unit you change between cooling and heating does not wait for its
+            band edge.
           default: false
           selector:
             boolean:
@@ -333,12 +343,10 @@ blueprint:
             fan.
 
 
-            **The cost: cooling comes back later than heating.** A unit moved to
-            heating stays in heating when the heating stops. It changes back to
-            cooling only when its room reaches setpoint + Heating Limit, and then
-            takes the outdoor unit at once. Units in heating are not moved while
-            cooling runs, so a heating room gets heating again at its setpoint
-            as soon as cooling stops.
+            **The cost:** a unit moved to heating stays in heating when the
+            heating stops. It changes back to cooling only when its room reaches
+            setpoint + Heating Limit, and then takes the outdoor unit at once.
+            Units in heating are not moved while cooling runs.
 
 
             Needs Lockout protection.
@@ -474,7 +482,7 @@ variables:
   # Bumped on every change. It appears at the top of the description, in the
   # trace, and at the front of every logbook entry, so the version actually
   # running can be read off a live system rather than assumed.
-  version: "0.10.5"
+  version: "0.10.6"
 
   climate_entities: !input climate_entities
   cool_limit: !input cool_limit
@@ -647,16 +655,31 @@ variables:
     {{ 'heat' if last_served == 'cool'
        else 'cool' if last_served == 'heat' else 'none' }}
 
-  # A room on the waiting side needs its mode: below its setpoint for heating,
-  # above it for cooling. Dry always wants cooling. Without this, a satisfied
-  # unit on each side made a lockout out of nothing, and the side that ran last
-  # was stood down every cooldown for a side that did not want the outdoor
-  # unit. [off-line, S7]
+  # A room on the waiting side needs its mode: at or past the edge of its band,
+  # the same edges as the rules and the turns. Dry always wants cooling.
+  # Without a test, a satisfied unit on each side made a lockout out of nothing.
+  # [off-line, S7]
+  #
+  # The edge, not the setpoint. Until 0.10.5 any distance past the setpoint
+  # counted, so a lounge 0.2 °C under its setpoint stood down an office that had
+  # just finished cooling, and Cooling priority then put the office into heating.
+  # [HW] The unit itself does not call that close to its setpoint either.
+  #
+  # The unit whose change between cooling and heating started this run counts
+  # whatever its room reads: the change is the request. A change this blueprint
+  # makes is at a band edge anyway, so this only matters for a change by you,
+  # the app or the remote. Its own stand-downs return a unit from fan_only,
+  # which the trigger does not match. If the cooldown holds this run back, the
+  # next five-minute run no longer knows about the change, and the room waits
+  # for its band edge like any other.
   waiting_needs: >-
+    {% set t = trigger | default({}) %}
+    {% set e = t.get('entity_id', '') if t.get('id', '') == 'mode_changed' else '' %}
     {% set ns = namespace(n=0) %}
     {% for f in fleet if f.mode == waiting_side %}
-      {% if (waiting_side == 'heat' and f.temp < f.target)
-            or (waiting_side == 'cool' and f.temp > f.target) %}
+      {% if f.entity == e
+            or (waiting_side == 'heat' and f.temp <= f.target - cool_limit)
+            or (waiting_side == 'cool' and f.temp >= f.target + heat_limit) %}
         {% set ns.n = ns.n + 1 %}
       {% endif %}
     {% endfor %}
@@ -1007,8 +1030,8 @@ variables:
     {%- elif standdown | count == 0 -%}
       IDLE lockout, but there is nothing to stand down{{ hold }}
     {%- elif not waiting_needs -%}
-      IDLE units in both modes, but no room on the {{ waiting_side }} side
-      needs it, so {{ last_served }} keeps the outdoor unit{{ hold }}
+      IDLE units in both modes, but no room on the {{ waiting_side }} side is
+      at the edge of its band, so {{ last_served }} keeps the outdoor unit{{ hold }}
     {%- elif not cooldown_passed -%}
       IDLE lockout, but
       {{ standdown | map(attribute='entity') | map('replace', 'climate.', '') | join(', ') }}
