@@ -11,13 +11,8 @@ longer depend on a platform having come up.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import voluptuous as vol
-
-from homeassistant import config_entries
-from homeassistant.const import CONF_HOST
-from homeassistant.core import HomeAssistant
-from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+import voluptuous as vol
 
 from custom_components.mitsubishi_wf_rac import async_setup_entry
 from custom_components.mitsubishi_wf_rac.config_flow import WfRacOptionsFlowHandler
@@ -30,6 +25,10 @@ from custom_components.mitsubishi_wf_rac.const import (
     SERVICE_SET_HORIZONTAL_SWING_MODE,
     SERVICE_SET_VERTICAL_SWING_MODE,
 )
+from homeassistant import config_entries
+from homeassistant.const import CONF_HOST
+from homeassistant.core import HomeAssistant
+from homeassistant.setup import async_setup_component
 
 _ACTIONS = (
     SERVICE_SET_HORIZONTAL_SWING_MODE,
@@ -55,7 +54,12 @@ async def test_actions_exist_without_a_working_device(hass: HomeAssistant):
 
 @pytest.mark.parametrize(
     "field",
-    ["temp_rule_cooling", "temp_setting_cooling", "temp_rule_heating", "temp_setting_heating"],
+    [
+        "temp_rule_cooling",
+        "temp_setting_cooling",
+        "temp_rule_heating",
+        "temp_setting_heating",
+    ],
 )
 async def test_set_home_leave_mode_rejects_a_temperature_the_unit_cannot_hold(
     hass: HomeAssistant, field: str
@@ -132,7 +136,13 @@ async def test_options_flow_reloads_itself(hass: HomeAssistant):
         options={},
     )
     entry.add_to_hass(hass)
-    device = MagicMock(available=True, connection_method=None, update=AsyncMock())
+    device = MagicMock(
+        available=True,
+        connection_method=None,
+        update=AsyncMock(),
+        # Awaited when hass stops at the end of the test.
+        async_release_external_temperature=AsyncMock(),
+    )
     with (
         patch(
             "custom_components.mitsubishi_wf_rac.create_device_from_entry",

@@ -1,13 +1,14 @@
 """Constants used by the mitsubishi-wf-rac component."""
 
 from datetime import timedelta
+
 from homeassistant.components.climate.const import (
-    HVACMode,
-    ClimateEntityFeature,
     FAN_AUTO,
+    FAN_HIGH,
     FAN_LOW,
     FAN_MEDIUM,
-    FAN_HIGH,
+    ClimateEntityFeature,
+    HVACMode,
 )
 
 DOMAIN = "mitsubishi_wf_rac"
@@ -18,15 +19,11 @@ DOMAIN = "mitsubishi_wf_rac"
 # discovery announcement carries something else.
 DEFAULT_PORT = 51443
 
-MIN_TIME_BETWEEN_UPDATES=timedelta(seconds=60)
+MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=60)
 
 CONF_OPERATOR_ID = "operator_id"
 CONF_AIRCO_ID = "airco_id"
-# Removed option, kept only so async_migrate_entry can strip it from entries
-# that predate v5. Nothing outside the migration reads it.
 CONF_AVAILABILITY_CHECK = "availability_check"
-# Consecutive failed polls before the device is reported unavailable; floored
-# at coordinator.py's AVAILABILITY_FAILURE_LIMIT_MIN.
 CONF_AVAILABILITY_RETRY_LIMIT = "availability_retry_limit"
 # Gates all outbound internet traffic (as opposed to local-network device
 # polling) - the manufacturer's getFirmware endpoint. Off by default: unlike
@@ -37,9 +34,27 @@ CONF_FIRMWARE_UPDATE_CHECK = "firmware_update_check"
 # New entries must not write this key.
 CONF_CREATE_SWING_MODE_SELECT = "create_swing_mode_select"
 CONF_CONNECTION_METHOD = "connection_method"
-# Learned, not configured: set once a module has shown that it applies the
-# operation-data request's empty power field as "switch off" (see
-# Device._check_request_stopped_unit).
+# Learned, not configured: which shape of operation-data request this unit can
+# be asked with. Written by ForeignWriterWatch.check_request_was_applied() the first time
+# the unit answers one by changing its own settings.
+#
+# strict  the request carries an empty command block, no set-bits. Correct
+#         everywhere the set-bit convention holds, which is everywhere we have
+#         measured except one module (#329).
+# echo    the block carries the unit's own settings, every set-bit set, read a
+#         moment before it goes out - so the frame confirms the settings a
+#         strict block would clear. What the manufacturer's app sends.
+# silent  no request at all. The last resort for a unit that changes its
+#         settings even when the frame confirms them: the operation-data
+#         sensors and the external-temperature override are given up so the
+#         unit stays usable.
+CONF_STATUS_REQUEST_MODE = "status_request_mode"
+STATUS_REQUEST_STRICT = "strict"
+STATUS_REQUEST_ECHO = "echo"
+STATUS_REQUEST_SILENT = "silent"
+
+# Superseded by CONF_STATUS_REQUEST_MODE and read only to carry entries written
+# by 2026.9.9-beta2..beta6 forward. True there means what "echo" means now.
 CONF_CARRY_POWER_STATE = "carry_power_state"
 ATTR_DEVICE_ID = "device_id"
 ATTR_CONNECTED_ACCOUNTS = "connected_accounts"
@@ -94,7 +109,6 @@ CONF_OVERSHOOT_DRY = "overshoot_dry"
 OVERSHOOT_MAX = 3.0
 
 
-
 # Heating uses the unit's own Heating TempSetting (10.0°C), which matches
 # HOME_LEAVE_TEMP_HEAT exactly. Cooling does not: the unit's Cooling
 # TempSetting reads 33.0°C, but the temperature actually applied while the
@@ -103,9 +117,6 @@ OVERSHOOT_MAX = 3.0
 # the applied value is known to flip Vacant.
 HOME_LEAVE_TEMP_HEAT = 10.0
 HOME_LEAVE_TEMP_COOL = 31.0
-# Temperature to restore when leaving Home Leave mode. There's no reliable way
-# to recall whatever temperature was set before Home Leave was turned on (the
-# unit itself doesn't report it), so this is a plain, reasonable default.
 NORMAL_TEMP = 21.0
 
 SERVICE_SET_HORIZONTAL_SWING_MODE = "set_horizontal_swing_mode"
@@ -122,7 +133,6 @@ SIGNAL_SET_ENERGY_TOTAL = f"{DOMAIN}_set_energy_total"
 
 SUPPORT_FLAGS = (
     ClimateEntityFeature.FAN_MODE
-    | ClimateEntityFeature.SWING_HORIZONTAL_MODE
     | ClimateEntityFeature.SWING_MODE
     | ClimateEntityFeature.TARGET_TEMPERATURE
     | ClimateEntityFeature.TURN_OFF
@@ -223,11 +233,6 @@ SUPPORTED_FAN_MODES = [
 ]
 
 
-
-
-# Optional certificate for the unit's HTTPS stack, looked up in the HA config
-# directory. Without it the connection falls back to a permissive SSL context.
-# Create it by running this in that directory:
 #   openssl s_client -connect <AC_IP_ADDRESS>:51443 -showcerts </dev/null 2>/dev/null \
 #       | openssl x509 -outform PEM > ac_cert.pem
 AC_CERT_FILENAME = "ac_cert.pem"

@@ -4,17 +4,17 @@ from dataclasses import dataclass
 import logging
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.const import (
+    CONF_DEVICE_ID,
+    CONF_HOST,
+    CONF_PORT,
+    EVENT_HOMEASSISTANT_STOP,
+    Platform,
+)
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv, issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
-
-from homeassistant.const import (
-    CONF_HOST,
-    CONF_PORT,
-    CONF_DEVICE_ID,
-    Platform,
-)
 
 from .const import (
     CONF_AIRCO_ID,
@@ -22,16 +22,28 @@ from .const import (
     CONF_AVAILABILITY_RETRY_LIMIT,
     CONF_CARRY_POWER_STATE,
     CONF_CONNECTION_METHOD,
+    CONF_CREATE_SWING_MODE_SELECT,
     CONF_FIRMWARE_UPDATE_CHECK,
-    CONF_OPERATOR_ID, CONF_CREATE_SWING_MODE_SELECT,
+    CONF_OPERATOR_ID,
+    CONF_OVERSHOOT_COOL,
+    CONF_OVERSHOOT_DRY,
+    CONF_OVERSHOOT_HEAT,
+    CONF_STATUS_REQUEST_MODE,
     DOMAIN,
+    OVERSHOOT_MAX,
+    STATUS_REQUEST_ECHO,
+    STATUS_REQUEST_STRICT,
 )
 from .coordinator import (
     AVAILABILITY_FAILURE_LIMIT_MIN,
     Device,
     registration_full_issue_id,
-    request_stops_unit_issue_id,
 )
+from .foreign_writers import (
+    request_stops_unit_issue_id,
+    status_request_unsupported_issue_id,
+)
+from .service_data import service_data_unanswered_issue_id
 from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,6 +63,7 @@ PLATFORMS = [
 @dataclass
 class MitsubishiWfRacData:
     """Class for storing runtime data."""
+
     device: Device
 
 
@@ -99,7 +112,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # reassociates on its own roughly once an hour, which a 60s poll
         # interval turns into a visible outage. Turn the check on, and lift
         # limits below 2, which are equivalent to it being off (Device.
-        # _set_availability() needs limit-1 consecutive failures to tolerate).
+        # the tolerance needs limit-1 consecutive failures to ride out).
         new_options[CONF_AVAILABILITY_CHECK] = True
         if new_options.get(CONF_AVAILABILITY_RETRY_LIMIT, 3) < 2:
             new_options[CONF_AVAILABILITY_RETRY_LIMIT] = 3
@@ -117,7 +130,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         new_options.pop(CONF_AVAILABILITY_CHECK, None)
         new_options[CONF_AVAILABILITY_RETRY_LIMIT] = max(
             AVAILABILITY_FAILURE_LIMIT_MIN,
-            new_options.get(CONF_AVAILABILITY_RETRY_LIMIT, AVAILABILITY_FAILURE_LIMIT_MIN),
+            new_options.get(
+                CONF_AVAILABILITY_RETRY_LIMIT, AVAILABILITY_FAILURE_LIMIT_MIN
+            ),
         )
 
         hass.config_entries.async_update_entry(entry, options=new_options, version=5)
@@ -149,21 +164,49 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.config_entries.async_update_entry(
             entry, unique_id=entry.data[CONF_AIRCO_ID].lower(), version=7
         )
+    if entry.version == 7:
+        # The room temperature handed to the unit used to be encoded with the
+        # SPI-bus projects' constant, which lands every value half a kelvin
+        # warmer at the unit than the manufacturer's own table says - the
+        # table the unit echoes the byte back through and the app displays
+        # it with (#218). pywfrac now encodes through that table, so the same
+        # figure in these fields would move the unit by half a kelvin on
+        # upgrade. Shifting a stored figure by that constant keeps the byte
+        # the unit receives identical: cooling and dry are subtracted from the
+        # reading, heating is added, so the signs differ. A field left at 0
+        # stays at 0 - it meant "hand the unit the reading as it is", and that
+        # is now the reading the unit was always meant to get. The result is
+        # kept on the 0.25 K grid and inside the field's range.
+        new_options = dict(entry.options)
+        for key, shift in (
+            (CONF_OVERSHOOT_COOL, -0.5),
+            (CONF_OVERSHOOT_DRY, -0.5),
+            (CONF_OVERSHOOT_HEAT, 0.5),
+        ):
+            value = new_options.get(key)
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and value
+            ):
+                shifted = round((value + shift) * 4) / 4
+                new_options[key] = max(-OVERSHOOT_MAX, min(OVERSHOOT_MAX, shifted))
+
+        hass.config_entries.async_update_entry(entry, options=new_options, version=8)
 
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: MitsubishiWfRacConfigEntry) -> bool:
+async def async_setup_entry(
+    hass: HomeAssistant, entry: MitsubishiWfRacConfigEntry
+) -> bool:
     """Establish connection with mitsubishi-wf-rac."""
     device: str = entry.data[CONF_HOST]
     _device = await create_device_from_entry(entry, hass)
 
-    await _device.update()  # initial update to get fresh values
-    # update() catches its own errors and reflects them via .available instead
-    # of raising (see coordinator.py) - check that instead of try/except so a
-    # device that's unreachable at startup gets HA's automatic retry-with-backoff
-    # rather than a silently "loaded" entry with no working entities.
-    if not _device.available:
+    # update() reports a failure in its return value rather than raising, so
+    # an unreachable device gets HA's retry-with-backoff here.
+    if not await _device.update():
         # No positional message: HomeAssistantError only renders the
         # translation when it is constructed without one.
         raise ConfigEntryNotReady(
@@ -186,12 +229,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: MitsubishiWfRacConfigEnt
         )
 
     entry.runtime_data = MitsubishiWfRacData(_device)
+
+    async def _handle_stop(_event: Event) -> None:
+        """Hand an armed external temperature override back on the way down.
+
+        Only on Home Assistant stopping, deliberately not in
+        async_unload_entry(): an unload is also what a reload is, and saving
+        the options reloads the entry - clearing the override there would put
+        the unit back on its own sensor for a moment on every settings change.
+        A stop is the case where nothing of ours writes again, which is the
+        one that leaves the value standing at the unit.
+        """
+        await _device.async_release_external_temperature()
+
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _handle_stop)
+    )
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
 
 
 async def create_device_from_entry(entry: ConfigEntry, hass: HomeAssistant) -> Device:
+    """Build the coordinator for a config entry."""
     device: str = entry.data[CONF_HOST]
     # The entry title, not a stored name: that is what Home Assistant's own
     # rename changes, and a name kept in entry.data would quietly ignore it.
@@ -200,30 +261,51 @@ async def create_device_from_entry(entry: ConfigEntry, hass: HomeAssistant) -> D
     operator_id: str = entry.data[CONF_OPERATOR_ID]
     port: int = entry.data[CONF_PORT]
     airco_id: str = entry.data[CONF_AIRCO_ID]
-    swing_selects_enabled_default: bool = entry.data.get(CONF_CREATE_SWING_MODE_SELECT, True)
+    swing_selects_enabled_default: bool = entry.data.get(
+        CONF_CREATE_SWING_MODE_SELECT, True
+    )
     # Off unless the user explicitly opted in via the options flow - this is
     # the only outbound internet call in the integration (see
     # coordinator.py's _maybe_check_firmware_update()).
-    firmware_update_check_enabled: bool = entry.options.get(CONF_FIRMWARE_UPDATE_CHECK, False)
+    firmware_update_check_enabled: bool = entry.options.get(
+        CONF_FIRMWARE_UPDATE_CHECK, False
+    )
     # Floored in Device itself, so an entry that predates the v4 -> v5
     # migration can't run with less tolerance than the module needs.
     availability_failure_limit: int = entry.options.get(
         CONF_AVAILABILITY_RETRY_LIMIT, AVAILABILITY_FAILURE_LIMIT_MIN
     )
     connection_method: str | None = entry.data.get(CONF_CONNECTION_METHOD)
-    # The stored key predates the fix and named only the power bit; the flag
-    # it sets now decides whether the whole state is carried.
-    carries_state: bool = bool(entry.data.get(CONF_CARRY_POWER_STATE, False))
-    _device = Device(hass, entry, name, device, port, device_id, operator_id, airco_id,
-                     swing_selects_enabled_default,
-                     availability_failure_limit=availability_failure_limit,
-                     firmware_update_check_enabled=firmware_update_check_enabled,
-                     connection_method=connection_method,
-                     status_request_carries_state=carries_state)
-    return _device
+    # Not migrated in async_migrate_entry: this is learned state, not
+    # configuration, and an entry that has never met the fault simply has
+    # neither key. The old one is honoured where it exists so a beta tester
+    # who already paid for the discovery does not pay again.
+    status_request_mode: str = entry.data.get(
+        CONF_STATUS_REQUEST_MODE,
+        STATUS_REQUEST_ECHO
+        if entry.data.get(CONF_CARRY_POWER_STATE, False)
+        else STATUS_REQUEST_STRICT,
+    )
+    return Device(
+        hass,
+        entry,
+        name,
+        device,
+        port,
+        device_id,
+        operator_id,
+        airco_id,
+        swing_selects_enabled_default,
+        availability_failure_limit=availability_failure_limit,
+        firmware_update_check_enabled=firmware_update_check_enabled,
+        connection_method=connection_method,
+        status_request_mode=status_request_mode,
+    )
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: MitsubishiWfRacConfigEntry) -> bool:
+async def async_unload_entry(
+    hass: HomeAssistant, entry: MitsubishiWfRacConfigEntry
+) -> bool:
     """Handle unload of entry."""
 
     # Unload entities for this entry/device.
@@ -247,27 +329,29 @@ async def async_unload_entry(hass: HomeAssistant, entry: MitsubishiWfRacConfigEn
     return unload_ok
 
 
-async def async_remove_entry(hass: HomeAssistant, entry: MitsubishiWfRacConfigEntry) -> None:
+async def async_remove_entry(
+    hass: HomeAssistant, entry: MitsubishiWfRacConfigEntry
+) -> None:
     """Handle removal of an entry."""
 
     temp_device = await create_device_from_entry(entry, hass)
-    # delete_account() returns None on failure rather than raising, so the
-    # result is what says whether the slot was actually released.
+    # delete_account() returns None for everything short of a confirmed
+    # release, which is what decides between the two lines.
     result = await temp_device.delete_account()
     if result is not None:
-        _LOGGER.info(
-            "Deleted operator ID [%s] from airco [%s]",
-            temp_device.operator_id,
-            temp_device.airco_id,
-        )
+        _LOGGER.info("Released the controller slot on airco [%s]", temp_device.airco_id)
     else:
         _LOGGER.warning(
-            "Could not delete operator ID [%s] from airco [%s]",
-            temp_device.operator_id,
+            "Could not release the controller slot on airco [%s]. Free it in "
+            "the manufacturer's app if you want it back",
             temp_device.airco_id,
         )
 
-    # Entry-scoped, so it would otherwise dangle in the repair list forever
-    # pointing at an entry_id that no longer resolves to anything.
     ir.async_delete_issue(hass, DOMAIN, registration_full_issue_id(entry.entry_id))
     ir.async_delete_issue(hass, DOMAIN, request_stops_unit_issue_id(entry.entry_id))
+    ir.async_delete_issue(
+        hass, DOMAIN, status_request_unsupported_issue_id(entry.entry_id)
+    )
+    ir.async_delete_issue(
+        hass, DOMAIN, service_data_unanswered_issue_id(entry.entry_id)
+    )

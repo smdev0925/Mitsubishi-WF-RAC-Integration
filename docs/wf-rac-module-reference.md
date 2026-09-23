@@ -486,13 +486,23 @@ not, and the bit is the one that answers "is this room being served".
 `state[7] & 0x10` stayed set in every sample, at 0 Hz and at full load alike,
 so whatever it means, it is not compressor state.
 
-### 4.5 Temperatures — prefer the segments over `state[5]`
+### 4.5 Temperatures — one byte, one table
 
 `state[5]` is `DB3`, the *room temperature the controller is currently working
-with*, in the SPI encoding `T = (raw − 61) / 4`, 0.25 °C steps `[EXT]`. It is
-populated on a live device — verified against a capture where `state[5] = 0x9A`
-⇒ 23.25 °C while the indoor-temperature segment read 23.5 °C `[HW]`. Usable as a
-coarse fallback, and useful as a plausibility check.
+with*. It is the **same raw byte** the pushed indoor-temperature segment (§5.2)
+carries — verified on two units over nine consecutive frames, `state[5]` equal to
+the segment's data byte every time `[HW]` — and it decodes through the same
+256-entry thermistor table (`indoorTempList`, 0.1 °C steps, −30…52 °C) `[APP]`.
+Over the living range (16…31 °C) that table is linear at `T = (raw − 59) / 4`
+within 0.05 K, i.e. 0.25 °C steps; outside it, it bends like the thermistor curve
+it is, so copy the table rather than fit a line.
+
+The SPI-bus projects decode this byte as `T = (raw − 61) / 4` `[EXT]`. Against the
+manufacturer's own table that reads half a kelvin low across the whole living
+range. It is very likely the "< 0.5 °C" discrepancy between room and return-air
+temperature that MHI-AC-Trace notes without explanation, and it was the constant
+this project encoded with until September 2026 — which is where the apparent
+0.5 K "echo" on injected values came from (§5.6).
 
 **The `0xFF` convention runs the other way.** `0xFF` means "no external value" in
 the *write* direction (`command[5]`, §5.6); in the read direction the AC reports
@@ -502,10 +512,10 @@ Which is literal: with an external room temperature injected, `state[5]` carries
 back exactly the value that was written, and so does the pushed indoor-temperature
 segment below — neither is a reading of the room any more. See §5.6. `[HW]`
 
-The temperature you actually want arrives as **pushed variable segments** (§5.2)
-with much better resolution: 256-entry thermistor lookup tables, 0.1 °C steps,
-−30…52 °C indoor and −50…43 °C outdoor. These tables are non-linear and are not
-derivable from a formula — copy them (the ones in this project live in
+The **pushed variable segments** (§5.2) remain the place to read temperatures
+from: the indoor one carries this same byte, the outdoor one has a table of its
+own (−50…43 °C), and both arrive unsolicited. The tables are non-linear and are
+not derivable from a formula — copy them (the ones in this project live in
 [`pywfrac`'s `utils.py`](https://github.com/blues-sechseck/pywfrac/blob/main/src/pywfrac/utils.py)). `[APP]`
 
 ---
@@ -705,9 +715,45 @@ Two things that do **not** work as one might expect `[HW]`:
   path from the trailer to it. The reply's own `OP1` says which sensor answered
   (§5.1), but that is the answer's field, not a way to ask.
 
+**An unknown code is refused, not ignored — and it takes the whole trailer with
+it.** If the indoor unit does not know one of the codes you asked for, the
+response carries `result: 11` and **none** of that request's segments are
+answered, including the valid ones. `[HW]` (On the meaning of `11` in general,
+see §2.7: it says "refused", not why.)
+
+Two consequences, and the second is the one that bites:
+
+- You can probe the code space without decoding anything. `result: 0` means the
+  unit knows the code, `result: 11` means it does not. Sweeping the whole space
+  on that basis is what §5.4 does. Be ready for a third outcome: a refusal
+  arrives as an unreadable response body often enough to matter (§5.4), so
+  retry once before recording a code as unknown.
+- **Batching is useless for exploration.** One unknown code voids the request,
+  so a batch of candidates reports only that the batch failed, never which
+  member was at fault. Ask one code per request while you are mapping unknown
+  territory; batch only codes you have already confirmed.
+
 **Limits.** The bridge does not clamp the segment count and copies `count × 4`
-bytes into a queue with room for 22 entries. `[FW]` Keep the count small (1–3);
-a large count is a buffer overrun on a device you cannot debug.
+bytes into a queue with room for 22 entries `[FW]` — but 22 is not the limit you
+will hit. The HTTP path in front of that queue gives out much earlier, measured
+on an SRK20ZS-WF running `WF-RAC-HTTPS 025/200` `[HW]`:
+
+| Segments | Result |
+| --- | --- |
+| 1–11 | clean. `result: 0`, every segment answered (6 of 6 runs at 11) |
+| 13 | unreliable. Three runs gave one malformed body, one `result: 11`, one clean |
+| 14 and above | never clean — either `result: 11` with nothing answered, or a response body that is not valid UTF-8 |
+
+"Malformed body" is the same failure mode as a malformed request field (§5.1):
+the module stops producing valid JSON at all. No lasting damage was observed —
+mode, setpoint and sensor readings were unchanged after every failure — but the
+request is lost.
+
+**Keep the count at 10 or below.** That leaves a step of headroom under the
+first observed wobble. And note that a failure contaminates the next request:
+immediately after a malformed response, a request was refused that went through
+six times in a row when retried on its own. If you probe near the boundary,
+pause and repeat before believing the result.
 
 **Timing.** SPI frames run at roughly 20/s `[EXT]`, one request per frame, so a
 handful of requests resolve in well under a second. Anything slower than that is
@@ -722,6 +768,9 @@ once with the compressor idle, once under load (setpoint forced 6 K below room
 temperature). Where a value moved sensibly between the two, that is noted —
 those readings are consistent with the MHI-AC-Ctrl formulas `[EXT]`, but two
 operating points are not a calibration, so the formulas stay `[INF]`.
+
+This table is the decoded subset. The whole code space has since been swept and
+49 codes answer in all — the rest are mapped at the end of this section.
 
 | Code | Name | Formula | Measured (compressor idle) |
 | --- | --- | --- | --- |
@@ -869,8 +918,9 @@ and the channel in §5.3 does not consult it — `0x05` and `0x7C` both answer w
 being absent from it. `[FW]` `[HW]` Judge a code by trying it, not by that list.
 
 `0x7C` is requested alongside the rest, as `Protection Number (raw)` — it sits
-in the same operation-data address space, and a code the module does not serve
-simply leaves its value empty, which costs nothing. It does answer,
+in the same operation-data address space. Batching it is safe because it is
+confirmed to answer, not because a miss would be harmless: a code the unit does
+not serve voids the whole request it rode in on (§5.3). It does answer,
 confirmed on three units across single- and multi-split `[HW]`, but it only
 ever reads `0`: a controlled test that reproduced a real overload clamp (see
 §5.7) left it unmoved. Read together with the stop-code table
@@ -879,8 +929,76 @@ stops rather than the speed-limit clamps in §5.7, the code appears to track
 protective *stops* only — it is not a general-purpose "unit is protecting
 itself" flag.
 
-`0x0C` has not been tried. On the reasoning above it is worth a request: a
-defrost flag is not otherwise available here, and asking costs one segment.
+**`0x0C` does answer**, tried on an SRK20ZS-WF `[HW]`: the segment comes back as
+`10 ff ff` — the unit accepts the code, but reports no value. The unit was
+switched off at the time, which is exactly when a defrost flag has nothing to
+say, so this neither confirms nor rules out a usable flag. It needs re-reading
+during a heating run that goes through a defrost cycle.
+
+#### The rest of the code space
+
+Every code value was requested one at a time, using `result: 0` vs.
+`result: 11` (§5.3) as the oracle. That is 255 questions, not 256: `0xFF` is
+the sentinel and cannot be asked for (see below). SRK20ZS-WF on
+`WF-RAC-HTTPS 025/200`, unit
+**switched off** throughout, two confirmation passes that returned the same 49
+codes with the same bytes. `[HW]`
+
+**49 codes answer in total, and 30 of them have no known meaning** — neither in
+the table above nor anywhere else in this section. Grouped by what they did at
+rest:
+
+| Behaviour | Codes |
+| --- | --- |
+| carries a value at rest | `0xAE` (`10 9c ff`), `0xAD` (`10 1e ff`), `0xD2` (`10 01 ff`) |
+| reports `0` while the unit is off | `0x10` `0x15` `0x22` `0x2A` `0x3E` `0x7B` `0x84` `0x86` `0x88` `0x8D` `0xA0` `0xA1` `0xA3` `0xA4` `0xA5` `0xB0` `0xD5` |
+| answers with no value (`OP2 = 0xFF`) | `0x02` (selector `0x12`), `0x0C` `0x14` `0x1C` `0x1D` `0x23` `0x45` |
+| answers all-`0xFF` | `0x44` `0xF1` |
+| answers with selector `0x80` | `0xDD` (`80 00 00`) |
+
+Read this as a map of where something exists, not as a set of new sensors. A
+value of `0` from a unit that is standing still carries no information, and 17
+of the 30 are in exactly that state — they have to be read again under load
+before any of them means anything. The three that do carry a value at rest are
+the ones worth chasing first, and one of them has a visible lead:
+
+- **`0xAE` tracks the indoor air temperature.** It moved with `0x80`/`sel 0x20`
+  (the return-air sensor, §5.2) across the sweep and the confirmation passes,
+  on the same scale, never more than one 0.25 K step apart, and the two agreed
+  exactly on the second pass. An unfiltered or differently-rounded read of the
+  same sensor is the obvious reading, but it has only been seen on a still
+  room — confirm it on a room whose temperature is actually moving before
+  relying on it.
+- **`0xAD` sat at `0x1E` (30) and `0xD2` at `0x01`** through every pass.
+  Nothing distinguishes a constant from a parameter that simply did not change
+  while the unit was off.
+- **`0xDD` answers with selector `0x80`**, a value that appears nowhere else in
+  any reply. Unexplained.
+
+**A refusal does not always arrive as JSON.** Of the 206 codes that were
+refused, 127 came back as `result: 11` and **79 came back as a response body
+that is not valid UTF-8** — the same malformed output an oversized request
+produces (§5.3). This is not a property of particular codes: the 79 were
+scattered across 47 separate runs of one to four consecutive codes, and not one
+of the 49 answering codes ever did it, across three passes. Treat a malformed
+body as a refusal you could not read, retry it once, and do not conclude
+anything about the code from it alone.
+
+The device state was unchanged after every such failure (mode, setpoint and
+sensor readings all identical), so it is a serialisation fault in the module,
+not damage. The request is lost, and it can disturb the one that follows it
+(§5.3).
+
+**A refused code and an empty answer are different things.** A refusal returns
+nothing at all in the trailer; a code the unit knows but has no reading for
+comes back as a segment with `OP2 = 0xFF`. Seven of the codes above are in that
+second group. So "no value" is itself information — it says the unit accepts the
+code — and it is only visible if you look at whether the segment arrived, not at
+its contents.
+
+`0xFF` is the one value you cannot probe: as a trailer code it is the
+"nothing to send" sentinel (§3.3), and the bridge discards it without queueing
+anything.
 
 ### 5.5 Code `248` — the one the app does use
 
@@ -906,8 +1024,13 @@ different code byte.
 ### 5.6 Injecting an external room temperature
 
 `command[5]` reaches the bus as `DB3`. Writing a value below `0xFF` makes the AC
-use it **instead of** its built-in sensor `[EXT]`; the encoding is
-`raw = round(T × 4) + 61`.
+use it **instead of** its built-in sensor `[EXT]`. The encoding is the inverse of
+the indoor-temperature table of §4.5: send the index whose table entry is nearest
+to `T`, which over 16…31 °C is `raw = round(T × 4) + 59`. **Not `+ 61`** — with
+that constant every injected value arrives half a kelvin warm, the app shows
+26.5 for a sent 26.0, and a cooling thermostat that stops a quarter to three
+quarters of a kelvin under the setting looks as if it stopped a full kelvin under
+it `[HW]`.
 
 The official app never writes this byte — it is fixed at `0xFF`. `[APP]` The
 path is open on the WF-RAC interface `[FW]`, and it works: **verified on an
@@ -915,19 +1038,18 @@ SRK20ZS-WF** (`WF-RAC-HTTPS` 025/200) in cooling `[HW]`. It is a real control
 command, not a query. This is the single most requested reason for replacing the
 module with an ESP32, and it does not require replacing anything.
 
-**Both read paths follow the injected value.** 18.0 °C written into `command[5]`
+**Both read paths follow the injected value.** `0x85` written into `command[5]`
 came back one poll cycle later as `state[5] = 0x85` — exactly the byte written —
-and as 18.5 °C in the pushed indoor-temperature segment (§5.2), while the room
-was at 21.2 °C. Writing `0xFF` again restored the real reading within one cycle,
-to 0.05 K of its previous value. So while an override stands, **nothing on the
-wire still reports the unit's own sensor**: a client that wants the room
-temperature has to keep its own source.
+and as 18.5 °C in the pushed indoor-temperature segment (§5.2), the same byte
+through the table, while the room was at 21.2 °C. Writing `0xFF` again restored
+the real reading within one cycle, to 0.05 K of its previous value. So while an
+override stands, **nothing on the wire still reports the unit's own sensor**: a
+client that wants the room temperature has to keep its own source.
 
-The 0.5 K between the two is not something the AC adds to injected values. The
-same gap sits between `state[5]` and the pushed segment in every reading with no
-override in sight (22.50/23.0, 22.25/22.7, 20.75/21.2) — `state[5]` steps in
-0.25 K, the pushed segment comes from the 0.1 K table of §5.2. One source, two
-resolutions.
+The AC adds nothing to an injected value on the way back. The 0.5 K gap between
+`state[5]` and the pushed segment that earlier captures seemed to show
+(22.50/23.0, 22.25/22.7, 20.75/21.2) was the `− 61` decoding of `state[5]` held
+against the table's decoding of the very same byte — see §4.5.
 
 The value has no set-bit of its own (§4.3), so it is written by whichever frame
 goes out next and reverted by any frame that leaves the byte at `0xFF` — there is
@@ -1189,7 +1311,7 @@ segment.
 | --- | --- |
 | `0xE236` | 18-byte COMMAND state, as received from the Wi-Fi side |
 | `0xE248` | COMMAND segment count; segments from `0xE249` |
-| `0xE1DE` | request queue, count in `0xFE3B6`, room for 22 segments — the count from `0xE248` is **not** bounds-checked, so do not exceed it |
+| `0xE1DE` | request queue, count in `0xFE3B6`, room for 22 segments — the count from `0xE248` is **not** bounds-checked. This is not the limit a client hits: the HTTP path in front of it gives out around 12 segments (§5.3) |
 | `0xE186` | response cache, count in `0xFE3B9`, 22 segments |
 | `0xE17A` | unsolicited-push cache, 3 slots; ROM table at `0x3025` = `80 01`, `80 00`, `94 01` |
 | `0xE2F5` | 18-byte RECEIVE state (what §4 calls `state[0..17]`) |

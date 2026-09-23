@@ -1,15 +1,16 @@
-"""Config flow WF-RAC"""
+"""Config flow for WF-RAC."""
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from functools import partial
+import logging
 from typing import Any
 from uuid import uuid4
 
-import homeassistant.helpers.config_validation as cv
+from pywfrac import RESULT_CODES, Repository, WfRacError
 import voluptuous as vol
+
 from homeassistant import config_entries, exceptions
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import (
@@ -24,29 +25,29 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import AbortFlow, section
 from homeassistant.helpers import entity_registry as er, selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 from .const import (
     AC_CERT_FILENAME,
-    DEFAULT_PORT,
+    CONF_AIRCO_ID,
+    CONF_AVAILABILITY_RETRY_LIMIT,
+    CONF_EXTERNAL_TEMPERATURE_SOURCE,
+    CONF_FIRMWARE_UPDATE_CHECK,
+    CONF_INDOOR_OFFSET,
+    CONF_OPERATOR_ID,
+    CONF_OUTDOOR_OFFSET,
     CONF_OVERSHOOT_COOL,
     CONF_OVERSHOOT_DRY,
     CONF_OVERSHOOT_HEAT,
-    OVERSHOOT_MAX,
-    CONF_AIRCO_ID,
-    CONF_AVAILABILITY_RETRY_LIMIT,
-    CONF_FIRMWARE_UPDATE_CHECK,
-    CONF_EXTERNAL_TEMPERATURE_SOURCE,
-    CONF_OPERATOR_ID,
-    CONF_INDOOR_OFFSET,
-    CONF_OUTDOOR_OFFSET,
     CONF_TARGET_OFFSET,
     CONF_TARGET_OFFSET_COOL,
     CONF_TARGET_OFFSET_HEAT,
+    DEFAULT_PORT,
     DOMAIN,
+    OVERSHOOT_MAX,
 )
 from .coordinator import AVAILABILITY_FAILURE_LIMIT_MIN
-from pywfrac import Repository, WfRacError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,12 +64,16 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # Has to match the highest version async_migrate_entry produces. Home
     # Assistant skips migration entirely once entry.version equals this, so a
     # new step that is not reflected here never runs.
-    VERSION = 7
+    VERSION = 8
     DOMAIN = DOMAIN
-    # Annotated, not assigned: a dict here would be shared by every flow.
-    _discovery_info: dict[str, Any]
 
-    def is_matching(self, other_flow: "WfRacConfigFlow") -> bool:
+    def __init__(self) -> None:
+        """Start a flow with no identifiers generated yet."""
+        self._discovery_info: dict[str, Any] = {}
+        self._generated_operator_id: str | None = None
+        self._generated_device_id: str | None = None
+
+    def is_matching(self, other_flow: WfRacConfigFlow) -> bool:
         """Return True if two flows are attempting to configure the same device."""
         # Compare based on unique IDs if available, otherwise compare context data
         if self.unique_id and other_flow.unique_id:
@@ -79,19 +84,19 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def _find_entry_matching(
         self, key: str, matches: Callable[[Any], bool]
     ) -> config_entries.ConfigEntry | None:
-        """Returns the first entry where matches(entry.data[key]) returns True"""
+        """Returns the first entry where matches(entry.data[key]) returns True."""
         for entry in self._async_current_entries():
             if key in entry.data and matches(entry.data[key]):
                 return entry
         return None
 
     async def _async_register_airco(
-            self,
-            hass: HomeAssistant,
-            data: dict[str, Any],
-            exclude_entry_id: str | None = None,
-            allow_port_fallback: bool = False,
-            expected_airco_id: str | None = None,
+        self,
+        hass: HomeAssistant,
+        data: dict[str, Any],
+        exclude_entry_id: str | None = None,
+        allow_port_fallback: bool = False,
+        expected_airco_id: str | None = None,
     ) -> dict[str, Any]:
         """Validate the user input allows us to connect, and register with the airco device.
 
@@ -175,11 +180,21 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         data[CONF_AIRCO_ID] = airco_id
         if not airco_id:
             raise CannotConnect(reason="unknown reason")
-        if (
-            expected_airco_id is not None
-            and airco_id.lower() != expected_airco_id.lower()
-        ):
-            raise AbortFlow("wrong_device")
+        if expected_airco_id is not None:
+            if airco_id.lower() != expected_airco_id.lower():
+                raise AbortFlow("wrong_device")
+        else:
+            # The airco id is what zeroconf keys on (the module announces
+            # itself as <mac>.local), so setting it here lets a discovery
+            # recognise a hand-added entry and catches a unit reached at a
+            # second address. Lower case on both sides: discovery reads it
+            # from the hostname, every other path from the airconId.
+            #
+            # Before registering, not after: registering takes one of the
+            # module's four account slots, and only the manufacturer's app
+            # frees one. A reconfigure has its own guard above.
+            await self.async_set_unique_id(airco_id.lower())
+            self._abort_if_unique_id_configured()
 
         _LOGGER.debug("Registering this controller on airco [%s]", airco_id)
         try:
@@ -207,32 +222,62 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raise CannotConnect(reason="unreadable registration answer") from unreadable
         if registration_result == 2:
             raise TooManyDevicesRegistered
+        # Every other code the library knows says the registration did not
+        # happen, so the form says so rather than storing an entry that cannot
+        # poll.
+        if registration_result != 0 and registration_result in RESULT_CODES:
+            raise CannotConnect(reason=RESULT_CODES[registration_result])
+        if registration_result != 0:
+            # Not refused: the handler of the firmware we can read maps its
+            # return value onto 0/1/2/11/12 and nothing else, so this is a
+            # branch we have never seen. Taking it for a failure would leave a
+            # unit that answers it unusable, so it is logged and let through -
+            # and the log line is the evidence we do not have yet.
+            _LOGGER.warning(
+                "Airco [%s] answered the registration with result %s, which is "
+                "not a code this integration knows. Setup continues. Please "
+                "report this together with the module's firmware version",
+                data[CONF_AIRCO_ID],
+                registration_result,
+            )
 
         return data
 
     async def _async_fetch_operator_id(self) -> str:
-        """Fetch UUID operator id if exists otherwise create it"""
+        """Fetch UUID operator id if exists otherwise create it."""
         entry = self._find_entry_matching(CONF_OPERATOR_ID, bool)
         if entry:
             return str(entry.data[CONF_OPERATOR_ID])
-        return f"hassio-{str(uuid4())[7:]}"
+        # Once per flow, not per submission: a registration whose answer was
+        # lost has still taken one of the four slots.
+        if self._generated_operator_id is None:
+            self._generated_operator_id = f"hassio-{str(uuid4())[7:]}"
+        return self._generated_operator_id
 
     async def _async_fetch_device_id(self) -> str:
-        """Fetch unique device id if exists otherwise create it"""
+        """Fetch unique device id if exists otherwise create it."""
         entry = self._find_entry_matching(CONF_DEVICE_ID, bool)
         if entry:
             return str(entry.data[CONF_DEVICE_ID])
-        return f"homeassistant-device-{uuid4().hex[21:]}"
+        if self._generated_device_id is None:
+            self._generated_device_id = f"homeassistant-device-{uuid4().hex[21:]}"
+        return self._generated_device_id
 
     async def _async_create_common(
-            self,
-            step_id: str,
-            data_schema: vol.Schema,
-            user_input: dict[str, Any] | None = None,
-            description_placeholders: dict[str, str] | None = None,
-            allow_port_fallback: bool = False,
+        self,
+        step_id: str,
+        build_schema: Callable[[], vol.Schema],
+        user_input: dict[str, Any] | None = None,
+        description_placeholders: dict[str, str] | None = None,
+        allow_port_fallback: bool = False,
     ) -> ConfigFlowResult:
-        """Create a new entry"""
+        """Create a new entry.
+
+        The schema is built twice: a submission can leave the values it was
+        checked against behind, and a form shown again has to suggest those
+        rather than the ones that did not work.
+        """
+        data_schema = build_schema()
         errors: dict[str, str] = {}
         description_placeholders = description_placeholders or {}
 
@@ -246,21 +291,7 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self.hass, user_input, allow_port_fallback=allow_port_fallback
                 )
 
-                # The airco id is the unit's own identity, and the one
-                # zeroconf keys on: the module announces itself as
-                # <mac>.local and the airco id is that same MAC. Registering
-                # it here is what lets a discovery recognise a manually added
-                # entry later - and it aborts a unit reached at a second
-                # address, which would otherwise become a second entry whose
-                # entities collide with the first one's. Lower case on both
-                # sides: discovery reads it from the announced hostname and
-                # every other path from the airconId the unit reports.
-                await self.async_set_unique_id(info[CONF_AIRCO_ID].lower())
-                self._abort_if_unique_id_configured()
-
                 data_input = user_input.copy()
-                # Form-only: it decides whether a duplicate host is accepted
-                # while adding, and means nothing to a stored entry.
                 data_input.pop(CONF_FORCE_UPDATE, None)
                 options_input = {
                     CONF_AVAILABILITY_RETRY_LIMIT: AVAILABILITY_FAILURE_LIMIT_MIN,
@@ -279,7 +310,10 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     options=options_input,
                 )
             except KnownError as error:
-                _LOGGER.error("create failed")
+                # An expected outcome of user input - a wrong address, a full
+                # account table. It belongs in the form, not in the log as an
+                # error with no reason in it.
+                _LOGGER.debug("Create failed: %s", error)
                 errors, placeholders = error.get_errors_and_placeholders(
                     data_schema.schema
                 )
@@ -293,17 +327,12 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # configured, already in progress - not an unexpected error.
                 raise
             except Exception:  # pylint: disable=broad-except
-                # Intentionally broad: this is the outermost boundary of the config
-                # flow step, so any bug here should show the user a graceful
-                # "unexpected_error" instead of crashing the flow.
-                _LOGGER.error("Unexpected exception", exc_info=True)
+                _LOGGER.exception("Unexpected exception")
                 errors[CONF_BASE] = "unexpected_error"
 
-        # If there is no user input or there were errors, show the form again, including any errors
-        # that were found with the input.
         return self.async_show_form(
             step_id=step_id,
-            data_schema=data_schema,
+            data_schema=build_schema(),
             errors=errors,
             description_placeholders=description_placeholders,
         )
@@ -315,12 +344,16 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         which: Callable[..., Any],
         default: Any = None,
     ) -> Any:
-        """Helper for creating schema fields"""
+        """Helper for creating schema fields."""
         value = user_input.get(name, default) if user_input else default
         description = None
         if value is not None:
             description = {"suggested_value": value}
-        return which(name, description=description)
+        if default is None:
+            return which(name, description=description)
+        # A suggestion only pre-fills: a cleared field leaves the key out of
+        # user_input altogether, and the schema default keeps it present.
+        return which(name, description=description, default=default)
 
     async def async_step_discovery_confirm(
         self, user_input: dict[str, Any] | None = None
@@ -337,27 +370,32 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             user_input[CONF_HOST] = self._discovery_info[CONF_HOST]
             user_input.setdefault(CONF_PORT, self._discovery_info[CONF_PORT])
 
-        field = partial(self._field, user_input)
-        data_schema = vol.Schema(
-            {
-                field(
-                    CONF_PORT, vol.Optional, self._discovery_info[CONF_PORT]
-                ): cv.port,
-            }
-        )
+        def build_schema() -> vol.Schema:
+            # Both halves of the field follow the port the flow is working
+            # with: after a fallback, clearing the field has to land on the
+            # port that answered rather than back on the announced one.
+            port = (user_input or self._discovery_info)[CONF_PORT]
+            field = partial(self._field, user_input)
+            return vol.Schema(
+                {
+                    field(CONF_PORT, vol.Optional, port): cv.port,
+                }
+            )
 
         return await self._async_create_common(
             step_id="discovery_confirm",
-            data_schema=data_schema,
+            build_schema=build_schema,
             user_input=user_input,
             description_placeholders=description_placeholders,
-            allow_port_fallback=True,
+            # A port corrected in the form is a decision, not an announcement.
+            allow_port_fallback=not user_input
+            or user_input[CONF_PORT] == self._discovery_info[CONF_PORT],
         )
 
     @staticmethod
     @callback
     def async_get_options_flow(
-            config_entry: config_entries.ConfigEntry,
+        config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
         """Create the options flow."""
         return WfRacOptionsFlowHandler()
@@ -367,21 +405,22 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle adding device manually."""
 
-        field = partial(self._field, user_input)
-        data_schema = vol.Schema(
-            {
-                field(CONF_HOST, vol.Required): cv.string,
-                field(CONF_PORT, vol.Optional, DEFAULT_PORT): cv.port,
-                field(CONF_FORCE_UPDATE, vol.Optional, False): cv.boolean,
-            }
-        )
+        def build_schema() -> vol.Schema:
+            field = partial(self._field, user_input)
+            return vol.Schema(
+                {
+                    field(CONF_HOST, vol.Required): cv.string,
+                    field(CONF_PORT, vol.Optional, DEFAULT_PORT): cv.port,
+                    field(CONF_FORCE_UPDATE, vol.Optional, False): cv.boolean,
+                }
+            )
 
         return await self._async_create_common(
-            step_id="user", data_schema=data_schema, user_input=user_input
+            step_id="user", build_schema=build_schema, user_input=user_input
         )
 
     async def async_step_reconfigure(
-            self, user_input: dict[str, Any] | None = None
+        self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle changing an existing entry's connection details (host/port)."""
         reconfigure_entry = self._get_reconfigure_entry()
@@ -438,7 +477,7 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except Exception:  # pylint: disable=broad-except
                 # Same outermost boundary as _async_create_common: a bug here
                 # should surface as "unexpected_error", not crash the flow.
-                _LOGGER.error("Unexpected exception", exc_info=True)
+                _LOGGER.exception("Unexpected exception")
                 errors[CONF_BASE] = "unexpected_error"
 
         return self.async_show_form(
@@ -449,14 +488,20 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_zeroconf(
-            self, discovery_info: ZeroconfServiceInfo
+        self, discovery_info: ZeroconfServiceInfo
     ) -> ConfigFlowResult:
         """Handle zeroconf discovery."""
 
-        local_name = discovery_info.hostname.rstrip(".")
+        # Lower case before anything is cut off it: DNS is case-insensitive,
+        # and an announcement shouting .LOCAL. would otherwise keep the suffix
+        # and never match the unit that is already configured.
+        local_name = discovery_info.hostname.rstrip(".").lower()
         node_name = local_name.removesuffix(".local")
         host = discovery_info.host
-        port = discovery_info.port
+        # An announcement without a port is still this module: the port is
+        # fixed in the firmware, and a form field with nothing behind it
+        # cannot be filled in or cleared.
+        port = discovery_info.port or DEFAULT_PORT
 
         _LOGGER.debug(
             "zeroconf discovery: hostname=%r, host=%r, port=%r",
@@ -465,14 +510,11 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             discovery_info.port,
         )
 
-        # Lower case on both sides: this id comes from the announced
-        # hostname while every other path takes it from the airconId the unit
-        # reports, and a difference in case would leave discovery unable to
-        # recognise an entry it had matched on before.
-        await self.async_set_unique_id(node_name.lower())
-        # The address only. A module that moved gets followed; its port is
-        # what setup was configured with, and a rediscovery announcing a
-        # different one would take a working entry offline.
+        # One case on both sides: this id comes from the hostname and every
+        # other path from the airconId the unit reports.
+        await self.async_set_unique_id(node_name)
+        # The address only, so a module that moved gets followed: modules have
+        # been seen announcing 5353 where the API port belongs.
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})
 
         info = {CONF_HOST: host, CONF_PORT: port}
@@ -486,6 +528,7 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._discovery_info = info
 
         return await self.async_step_discovery_confirm()
+
 
 class WfRacOptionsFlowHandler(config_entries.OptionsFlowWithReload):
     """Base class for options handling.
@@ -536,7 +579,7 @@ class WfRacOptionsFlowHandler(config_entries.OptionsFlowWithReload):
         return keys
 
     async def async_step_init(
-            self, user_input: dict[str, Any] | None = None
+        self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Manage the options."""
         if user_input is not None:
@@ -593,7 +636,7 @@ class WfRacOptionsFlowHandler(config_entries.OptionsFlowWithReload):
         # correction the other way, and there is no reason to make that
         # impossible before anyone has looked.
         # A quarter degree is where this one stops mattering: the room
-        # temperature byte it corrects is round(T * 4) + 61, and the source
+        # temperature byte it corrects carries 0.25 K steps, and the source
         # value entering that sum has already been snapped to the same grid
         # (see AircoClimate._external_temperature_from_source_state), so a
         # finer correction is rounded away for every reading rather than only
@@ -615,8 +658,9 @@ class WfRacOptionsFlowHandler(config_entries.OptionsFlowWithReload):
                     device_class="temperature",
                     # This integration's own temperature sensors report the
                     # injected value back while an override is armed, so
-                    # picking one would feed the override into itself and walk
-                    # it away from the room half a kelvin per poll.
+                    # picking one would feed the override into itself - and
+                    # with an overshoot set, walk it away from the room by
+                    # that much per poll.
                     # EntitySelector rejects an excluded entity on submit, not
                     # just in the picker, so this is the enforcement and not
                     # only a convenience.
@@ -624,31 +668,38 @@ class WfRacOptionsFlowHandler(config_entries.OptionsFlowWithReload):
                 )
             ),
         }
-        # The overshoot corrections act on the room temperature handed to the
-        # unit, so without a source there is no value to bend and the fields
-        # do nothing at all. They appear once a source is picked and saved -
-        # a form cannot rebuild itself while it is open.
+        # Tied to the source picker on purpose, and not because the correction
+        # needs one: ExternalTemperatureFeed.corrected() bends whatever value is
+        # armed, including one set from the action. A source entity is what
+        # makes the corrections worth offering - it is watched, so a reading
+        # that goes unavailable or unusable clears the override and hands the
+        # unit back to its own sensor, while a value armed from the action
+        # stays until something clears it. Showing the fields without a source
+        # would recommend the arrangement that has no fallback (#218). They
+        # appear once a source is picked and saved - a form cannot rebuild
+        # itself while it is open.
         if self._source_configured:
             source_fields.update(
                 {
-                    # Cooling starts at the figure four units have measured
-                    # (0.6-1.3 K past the setting, three of them 1.0-1.2), so
-                    # the field opens on a number that is roughly right
-                    # instead of on one that is certainly wrong. It is a
-                    # pre-fill and nothing more: the correction applies once
-                    # the form is saved, and _resolve_overshoot still reads 0
-                    # until then, so nobody's regulation moves without them
-                    # seeing the value first. Heating has looked symmetric
-                    # around the setting wherever it has been measured, so
-                    # there is no figure to offer - and dry opens on zero for
-                    # the opposite reason: nobody has measured it at all, and a
-                    # pre-filled guess there would move real regulation on the
-                    # strength of one (#218).
+                    # Cooling starts at the figure four units have measured:
+                    # their thermostat band stops 0.25-0.75 K past the
+                    # setting once the reading reaches the unit on the
+                    # manufacturer's scale (#218), so the field opens on a
+                    # number that is roughly right instead of on one that is
+                    # certainly wrong. It is a pre-fill and nothing more: the
+                    # correction applies once the form is saved, and the
+                    # feed's overshoot still reads 0 until then, so nobody's
+                    # regulation moves without them seeing the value first.
+                    # Heating has looked symmetric around the setting wherever
+                    # it has been measured, so there is no figure to offer -
+                    # and the one dry measurement so far needed no correction
+                    # beyond the scale itself, so dry opens on zero as a
+                    # measured figure rather than a placeholder.
                     vol.Optional(
                         key, default=options.get(key, suggested)
                     ): overshoot_validator
                     for key, suggested in (
-                        (CONF_OVERSHOOT_COOL, 1.0),
+                        (CONF_OVERSHOOT_COOL, 0.5),
                         (CONF_OVERSHOOT_DRY, 0.0),
                         (CONF_OVERSHOOT_HEAT, 0.0),
                     )
@@ -698,9 +749,12 @@ class WfRacOptionsFlowHandler(config_entries.OptionsFlowWithReload):
                     vol.Required(
                         CONF_AVAILABILITY_RETRY_LIMIT,
                         default=options.get(
-                            CONF_AVAILABILITY_RETRY_LIMIT, AVAILABILITY_FAILURE_LIMIT_MIN
+                            CONF_AVAILABILITY_RETRY_LIMIT,
+                            AVAILABILITY_FAILURE_LIMIT_MIN,
                         ),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=AVAILABILITY_FAILURE_LIMIT_MIN)),
+                    ): vol.All(
+                        vol.Coerce(int), vol.Range(min=AVAILABILITY_FAILURE_LIMIT_MIN)
+                    ),
                     vol.Required(
                         CONF_FIRMWARE_UPDATE_CHECK,
                         default=options.get(CONF_FIRMWARE_UPDATE_CHECK, False),
@@ -731,24 +785,23 @@ class WfRacOptionsFlowHandler(config_entries.OptionsFlowWithReload):
 class KnownError(exceptions.HomeAssistantError):
     """Base class for errors known to this config flow.
 
-    [error_name] is the value passed to [errors] in async_show_form, which should match a key
-    under "errors" in strings.json
-
-    [applies_to_field] is the name of the field name that contains the error (for
-    async_show_form); if the field doesn't exist in the form CONF_BASE will be used instead.
+    Deliberately not a HomeAssistantError: none of these leaves the flow, so
+    error_name is a key under "error" in strings.json rather than a
+    translation key, and applies_to_field falls back to CONF_BASE.
     """
 
     error_name = "unknown_error"
     applies_to_field = CONF_BASE
 
     def __init__(self, *args: object, **kwargs: str) -> None:
+        """Keep the placeholders the message needs alongside the error."""
         super().__init__(*args)
         self._extra_info = kwargs
 
     def get_errors_and_placeholders(
         self, schema: Any
     ) -> tuple[dict[str, str], dict[str, str]]:
-        """Return dicts of errors and description_placeholders, for adding to async_show_form"""
+        """Return dicts of errors and description_placeholders, for adding to async_show_form."""
         key = self.applies_to_field
         # An error only shows if its key is in the form; anything else falls
         # back to CONF_BASE.
@@ -771,14 +824,14 @@ class InvalidHost(KnownError):
 
 
 class HostAlreadyConfigured(KnownError):
-    """Error to indicate there is an duplicate hostname."""
+    """Error to indicate there is a duplicate hostname."""
 
     error_name = "host_already_configured"
     applies_to_field = CONF_HOST
 
 
 class TooManyDevicesRegistered(KnownError):
-    """Error to indicate that there are too many devices registered"""
+    """Error to indicate that there are too many devices registered."""
 
     error_name = "too_many_devices_registered"
     applies_to_field = CONF_BASE

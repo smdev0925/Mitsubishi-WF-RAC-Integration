@@ -8,13 +8,8 @@ them at runtime any more - the migration's job is to leave no trace of them.
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from pywfrac import WfRacConnectionError, WfRacError
-
-from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import CONF_HOST
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pywfrac import WfRacConnectionError, WfRacError
 
 from custom_components.mitsubishi_wf_rac import (
     async_migrate_entry,
@@ -23,12 +18,19 @@ from custom_components.mitsubishi_wf_rac import (
 )
 from custom_components.mitsubishi_wf_rac.config_flow import WfRacConfigFlow
 from custom_components.mitsubishi_wf_rac.const import (
-    CONF_CONNECTION_METHOD,
     CONF_AVAILABILITY_CHECK,
     CONF_AVAILABILITY_RETRY_LIMIT,
+    CONF_CONNECTION_METHOD,
+    CONF_OVERSHOOT_COOL,
+    CONF_OVERSHOOT_DRY,
+    CONF_OVERSHOOT_HEAT,
     DOMAIN,
 )
 from custom_components.mitsubishi_wf_rac.coordinator import registration_full_issue_id
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import CONF_HOST, EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 
 _DATA = {
     "name": "Living Room AC",
@@ -38,10 +40,12 @@ _DATA = {
     "port": 51443,
 }
 
-_CURRENT_VERSION = 7
+_CURRENT_VERSION = 8
 
 
-def _entry(hass: HomeAssistant, version: int, data: dict, options: dict) -> MockConfigEntry:
+def _entry(
+    hass: HomeAssistant, version: int, data: dict, options: dict
+) -> MockConfigEntry:
     entry = MockConfigEntry(domain=DOMAIN, version=version, data=data, options=options)
     entry.add_to_hass(hass)
     return entry
@@ -103,7 +107,11 @@ async def test_migrate_keeps_unrelated_options(hass: HomeAssistant):
         hass,
         4,
         _DATA,
-        {CONF_HOST: "192.168.1.50", "indoor_offset": -1.5, CONF_AVAILABILITY_CHECK: True},
+        {
+            CONF_HOST: "192.168.1.50",
+            "indoor_offset": -1.5,
+            CONF_AVAILABILITY_CHECK: True,
+        },
     )
 
     assert await async_migrate_entry(hass, entry)
@@ -113,7 +121,9 @@ async def test_migrate_keeps_unrelated_options(hass: HomeAssistant):
 
 async def test_migrate_is_idempotent_at_current_version(hass: HomeAssistant):
     options = {"indoor_offset": -1.5}
-    entry = _entry(hass, _CURRENT_VERSION, {**_DATA, CONF_HOST: "192.168.1.50"}, options)
+    entry = _entry(
+        hass, _CURRENT_VERSION, {**_DATA, CONF_HOST: "192.168.1.50"}, options
+    )
 
     assert await async_migrate_entry(hass, entry)
 
@@ -133,7 +143,9 @@ async def test_device_is_built_without_availability_options(hass: HomeAssistant)
     assert device._consecutive_failures == 0  # pylint: disable=protected-access
 
 
-async def test_remove_entry_clears_the_registration_full_repair_issue(hass: HomeAssistant):
+async def test_remove_entry_clears_the_registration_full_repair_issue(
+    hass: HomeAssistant,
+):
     """A repair issue is entry-scoped (see wfrac/device.py's add_account) - it
     must not survive the entry it was raised against, or it stays in the
     Repairs list forever pointing at nothing.
@@ -156,7 +168,9 @@ async def test_remove_entry_clears_the_registration_full_repair_issue(hass: Home
         await async_remove_entry(hass, entry)
 
     assert (
-        ir.async_get(hass).async_get_issue(DOMAIN, registration_full_issue_id(entry.entry_id))
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, registration_full_issue_id(entry.entry_id)
+        )
         is None
     )
 
@@ -181,9 +195,14 @@ async def test_an_entry_from_before_the_host_moved_still_sets_up(hass: HomeAssis
     """
     entry = _entry(hass, 5, _DATA, {CONF_HOST: "192.168.1.50"})
 
+    # A real dict, not a bare mock: the poll reads named fields out of the
+    # answer, and a mock answers every one of them with another mock.
+    repository = AsyncMock()
+    repository.get_aircon_stats.return_value = {}
+
     with patch(
         "custom_components.mitsubishi_wf_rac.coordinator.Repository",
-        return_value=AsyncMock(),
+        return_value=repository,
     ):
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -264,6 +283,42 @@ async def test_a_failed_platform_unload_keeps_the_coordinator(
         await device.async_shutdown()
 
 
+async def test_stopping_home_assistant_hands_the_override_back(
+    hass: HomeAssistant, repository: AsyncMock
+):
+    """A stop is the one case where nothing of ours writes again, so the value
+    the unit was handed would stand there. A reload must not do this: the
+    override is re-armed seconds later, and the unit would flick back to its
+    own sensor on every saved option.
+    """
+    entry = _entry(hass, _CURRENT_VERSION, {**_DATA, CONF_HOST: "192.168.1.50"}, {})
+
+    with patch(
+        "custom_components.mitsubishi_wf_rac.coordinator.Repository",
+        return_value=repository,
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        device = entry.runtime_data.device
+
+        with patch.object(
+            device, "async_release_external_temperature", AsyncMock()
+        ) as release:
+            await hass.config_entries.async_reload(entry.entry_id)
+            await hass.async_block_till_done()
+            release.assert_not_awaited()
+
+        device = entry.runtime_data.device
+        with patch.object(
+            device, "async_release_external_temperature", AsyncMock()
+        ) as release:
+            hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+            await hass.async_block_till_done()
+            release.assert_awaited_once()
+
+        await device.async_shutdown()
+
+
 async def test_removal_says_so_when_the_slot_is_not_released(
     hass: HomeAssistant, caplog: pytest.LogCaptureFixture
 ):
@@ -282,7 +337,7 @@ async def test_removal_says_so_when_the_slot_is_not_released(
     ):
         await async_remove_entry(hass, entry)
 
-    assert "Could not delete operator ID" in caplog.text
+    assert "Could not release the controller slot" in caplog.text
 
 
 async def test_migrate_v6_registers_the_airco_id_as_unique_id(hass: HomeAssistant):
@@ -312,6 +367,68 @@ async def test_migrate_v6_lowers_the_case_of_the_unique_id(hass: HomeAssistant):
     assert await async_migrate_entry(hass, entry)
 
     assert entry.unique_id == "348e89c5a137"
+
+
+async def test_migrate_v7_shifts_the_overshoots_onto_the_manufacturer_scale(
+    hass: HomeAssistant,
+):
+    """The room temperature used to reach the unit half a kelvin warm; pywfrac
+    now encodes it on the manufacturer's scale. A stored figure moves by that
+    constant so the byte the unit receives on upgrade is the one it received
+    before - subtracted in cooling and dry, added in heating.
+    """
+    entry = _entry(
+        hass,
+        7,
+        {**_DATA, CONF_HOST: "192.168.1.50"},
+        {
+            CONF_OVERSHOOT_COOL: 1.0,
+            CONF_OVERSHOOT_DRY: 0.5,
+            CONF_OVERSHOOT_HEAT: 0.75,
+            "indoor_offset": -1.5,
+        },
+    )
+
+    assert await async_migrate_entry(hass, entry)
+
+    assert entry.version == _CURRENT_VERSION
+    assert entry.options[CONF_OVERSHOOT_COOL] == 0.5
+    assert entry.options[CONF_OVERSHOOT_DRY] == 0.0
+    assert entry.options[CONF_OVERSHOOT_HEAT] == 1.25
+    assert entry.options["indoor_offset"] == -1.5
+
+
+async def test_migrate_v7_leaves_a_zero_overshoot_alone(hass: HomeAssistant):
+    """Zero meant "hand the unit the reading as it is" - and the reading it
+    now gets is the one it was always meant to. Absent fields stay absent."""
+    entry = _entry(
+        hass,
+        7,
+        {**_DATA, CONF_HOST: "192.168.1.50"},
+        {CONF_OVERSHOOT_COOL: 0.0, CONF_OVERSHOOT_DRY: 0},
+    )
+
+    assert await async_migrate_entry(hass, entry)
+
+    assert entry.options[CONF_OVERSHOOT_COOL] == 0.0
+    assert entry.options[CONF_OVERSHOOT_DRY] == 0
+    assert CONF_OVERSHOOT_HEAT not in entry.options
+
+
+async def test_migrate_v7_keeps_the_shifted_overshoot_inside_the_range(
+    hass: HomeAssistant,
+):
+    entry = _entry(
+        hass,
+        7,
+        {**_DATA, CONF_HOST: "192.168.1.50"},
+        {CONF_OVERSHOOT_COOL: -3.0, CONF_OVERSHOOT_HEAT: 3.0},
+    )
+
+    assert await async_migrate_entry(hass, entry)
+
+    assert entry.options[CONF_OVERSHOOT_COOL] == -3.0
+    assert entry.options[CONF_OVERSHOOT_HEAT] == 3.0
 
 
 async def test_the_device_name_follows_the_entry_title(hass: HomeAssistant):

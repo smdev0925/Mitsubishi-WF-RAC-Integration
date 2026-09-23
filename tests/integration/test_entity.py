@@ -10,23 +10,28 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mitsubishi_wf_rac.button import EnergyTotalResetButton
 from custom_components.mitsubishi_wf_rac.const import DOMAIN
-from custom_components.mitsubishi_wf_rac.entity import WfRacEntity
 from custom_components.mitsubishi_wf_rac.coordinator import (
     AVAILABILITY_FAILURE_LIMIT_MIN,
     Device,
 )
+from custom_components.mitsubishi_wf_rac.entity import WfRacEntity
 
 
 @pytest.fixture
 async def device(hass):
     dev = Device(
-        hass, MockConfigEntry(domain=DOMAIN), "Test AC", "127.0.0.1", 51443,
-        "device-id", "operator-id", "airco-id",
+        hass,
+        MockConfigEntry(domain=DOMAIN),
+        "Test AC",
+        "127.0.0.1",
+        51443,
+        "device-id",
+        "operator-id",
+        "airco-id",
         swing_selects_enabled_default=True,
     )
     dev._api = AsyncMock()
@@ -69,7 +74,7 @@ async def test_an_unreadable_frame_marks_the_entity_unknown_not_the_device(devic
     entity._update_state = MagicMock(side_effect=ValueError)
     entity._mark_state_unknown = MagicMock()
     entity.async_write_ha_state = lambda: None
-    device._set_availability(True)
+    device._record_reachable()
 
     # More failures in a row than it takes to declare the device unavailable:
     # one unreadable field must not do it, and neither must a run of them.
@@ -77,7 +82,7 @@ async def test_an_unreadable_frame_marks_the_entity_unknown_not_the_device(devic
         entity._handle_coordinator_update()
 
     entity._mark_state_unknown.assert_called_with()
-    assert device.available is True
+    assert device.last_update_success is True
     assert entity.available is True
 
 

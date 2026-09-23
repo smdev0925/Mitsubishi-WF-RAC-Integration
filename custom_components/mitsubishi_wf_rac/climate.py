@@ -1,43 +1,48 @@
 """for Climate integration."""
 
 from __future__ import annotations
-import logging
+
 from dataclasses import dataclass
+import logging
 from typing import Any
 
-from . import MitsubishiWfRacConfigEntry
+from pywfrac import AIRFLOW_UNKNOWN, Aircon, AirconCommands, HomeLeaveModeSetting
+from pywfrac.parser import EXTERNAL_TEMPERATURE_MAX, EXTERNAL_TEMPERATURE_MIN
 
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
-    ClimateEntityFeature,
-    HVACMode,
-    HVACAction,
+    ATTR_HVAC_MODE,
     FAN_AUTO,
     PRESET_AWAY,
     PRESET_NONE,
+    ClimateEntityFeature,
+    HVACAction,
+    HVACMode,
 )
 from homeassistant.const import (
     ATTR_TEMPERATURE,
     ATTR_UNIT_OF_MEASUREMENT,
-    STATE_UNKNOWN,
     STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
     UnitOfTemperature,
 )
-from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State, callback
+from homeassistant.core import (
+    Event,
+    EventStateChangedData,
+    HomeAssistant,
+    State,
+    callback,
+)
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.util.unit_conversion import TemperatureConverter
 
-from .entity import WfRacEntity
-from .coordinator import Device
-from pywfrac import AIRFLOW_UNKNOWN, Aircon, AirconCommands, HomeLeaveModeSetting
-from pywfrac.parser import (
-    EXTERNAL_TEMPERATURE_MAX,
-    EXTERNAL_TEMPERATURE_MIN,
-)
+from . import MitsubishiWfRacConfigEntry
 from .const import (
+    CONF_EXTERNAL_TEMPERATURE_SOURCE,
+    CONF_INDOOR_OFFSET,
     DOMAIN,
     FAN_MODE_TRANSLATION,
     HOME_LEAVE_TEMP_COOL,
@@ -45,18 +50,18 @@ from .const import (
     HVAC_TRANSLATION,
     NORMAL_TEMP,
     SUPPORT_FLAGS,
-    SWING_HORIZONTAL_AUTO,
-    SWING_VERTICAL_AUTO,
+    SUPPORT_SWING_HORIZONTAL_MODES,
     SUPPORT_SWING_MODES,
     SUPPORTED_FAN_MODES,
     SUPPORTED_HVAC_MODES,
     SWING_3D_AUTO,
-    SWING_MODE_TRANSLATION,
+    SWING_HORIZONTAL_AUTO,
     SWING_HORIZONTAL_MODE_TRANSLATION,
-    SUPPORT_SWING_HORIZONTAL_MODES,
-    CONF_INDOOR_OFFSET,
-    CONF_EXTERNAL_TEMPERATURE_SOURCE,
+    SWING_MODE_TRANSLATION,
+    SWING_VERTICAL_AUTO,
 )
+from .coordinator import Device
+from .entity import WfRacEntity
 
 _LOGGER = logging.getLogger(__name__)
 # Zero although this platform writes: the coordinator already serialises and
@@ -73,7 +78,7 @@ async def async_setup_entry(
     entry: MitsubishiWfRacConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Setup climate entities"""
+    """Set up the climate entity."""
     device: Device = entry.runtime_data.device
     _LOGGER.debug("Setup climate for: %s, %s", device.device_name, device.airco_id)
     async_add_entities([AircoClimate(device)])
@@ -94,6 +99,12 @@ class ExternalTemperatureOverrideData(ExtraStoredData):
     # the latter is a standing intent worth restoring: a value a source left
     # behind belongs to a source that may since have been removed, and
     # re-arming it would leave the unit regulating on a reading nobody updates.
+    #
+    # Recorded when the value is armed, not when it is saved. Saving happens
+    # while the entity is being removed, and removing the source is what
+    # reloads the entry (OptionsFlowWithReload) - so by then the options no
+    # longer name a source, and asking them would write False for exactly the
+    # value this flag exists to catch.
     from_source: bool = False
 
     def as_dict(self) -> dict[str, Any]:
@@ -104,10 +115,29 @@ class ExternalTemperatureOverrideData(ExtraStoredData):
         }
 
 
+def _without_3d_auto(modes: list[str]) -> list[str]:
+    """The mode list a unit gets when it cannot hand both vanes to the unit."""
+    return [mode for mode in modes if mode != SWING_3D_AUTO]
+
+
+def _stored_external_temperature_is_set(stored: ExtraStoredData | None) -> bool:
+    """Whether anything was armed when this entity was last taken down.
+
+    Only its presence is asked for: what the value was does not matter to the
+    caller, which is deciding whether the unit may still be holding one.
+    """
+    if stored is None:
+        return False
+    return stored.as_dict().get("external_temperature_override") is not None
+
+
 class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
-    """Representation of a climate entity"""
+    """Representation of a climate entity."""
 
     _external_temperature_override: float | None = None
+    # Provenance of the value above, kept for extra_restore_state_data - see
+    # ExternalTemperatureOverrideData.from_source.
+    _external_temperature_from_source: bool = False
 
     _attr_supported_features: ClimateEntityFeature = SUPPORT_FLAGS
     _attr_temperature_unit: str = UnitOfTemperature.CELSIUS
@@ -125,8 +155,6 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
     # displayed target off the grid; that is the offset's job, and it stays
     # visible rather than the UI promising a resolution the device lacks.
     _attr_target_temperature_step: float = 0.5
-    # Only filled in when the model reports VacantProperty (see __init__);
-    # ClimateEntity has no class-level default for either of these.
     _attr_preset_modes: list[str] | None = None
     _attr_preset_mode: str | None = None
     _attr_translation_key = "mitsubishi_wf_rac"
@@ -134,29 +162,57 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
     _attr_name: str | None = None
 
     def __init__(self, device: Device) -> None:
+        """Initialize the climate entity."""
         super().__init__(device)
-        self._attr_unique_id = f"{DOMAIN}-{self._device.airco_id}-climate"
-        # Away is the unit's own Home Leave mode, offered here as the preset a
-        # thermostat card and a voice assistant already know how to ask for.
+        self._attr_unique_id = f"{DOMAIN}-{self.coordinator.airco_id}-climate"
+        capabilities = device.airco.Capabilities
+        features = SUPPORT_FLAGS
         # HomeLeaveModeSelect in select.py stays: it can name the direction
         # (away_cool/away_heat), which a single preset cannot, and it is what
         # existing automations target. Same capability gate as that select.
-        if device.airco.Capabilities.vacant_property:
-            self._attr_supported_features = (
-                SUPPORT_FLAGS | ClimateEntityFeature.PRESET_MODE
-            )
+        if capabilities.vacant_property:
+            features |= ClimateEntityFeature.PRESET_MODE
             self._attr_preset_modes = [PRESET_NONE, PRESET_AWAY]
+        # The left/right vane and 3D auto belong to the model line: the
+        # manufacturer's table has both off for the ceiling cassettes, which
+        # have no horizontal vane to aim.
+        if capabilities.wind_direction_lr:
+            features |= ClimateEntityFeature.SWING_HORIZONTAL_MODE
+        else:
+            self._attr_swing_horizontal_mode = None
+            self._attr_swing_horizontal_modes = None
+        if not capabilities.entrust:
+            self._attr_swing_modes = _without_3d_auto(SUPPORT_SWING_MODES)
+            if self._attr_swing_horizontal_modes is not None:
+                self._attr_swing_horizontal_modes = _without_3d_auto(
+                    SUPPORT_SWING_HORIZONTAL_MODES
+                )
+        self._attr_supported_features = features
         self._apply_state()
 
     async def async_added_to_hass(self) -> None:
+        """Register with the coordinator and publish the first state."""
         await super().async_added_to_hass()
         source = self._external_temperature_source
+        stored = await self.async_get_last_extra_data()
         if source is None:
-            self._restore_external_temperature_override(await self.async_get_last_extra_data())
+            self._restore_external_temperature_override(stored)
         else:
             # A source's current state is more authoritative than restore data:
             # the latter can be stale precisely when the source stopped reporting.
-            self._set_external_temperature_from_source_state(self.hass.states.get(source))
+            self._set_external_temperature_from_source_state(
+                self.hass.states.get(source)
+            )
+            if (
+                self._external_temperature_override is None
+                and _stored_external_temperature_is_set(stored)
+            ):
+                # Something was armed before this reload and the source has
+                # nothing usable to put in its place. The frames that fed the
+                # unit went out in the previous life of the coordinator, so it
+                # cannot know the unit is still holding that value - only this
+                # entity's restored state says so.
+                self.coordinator.request_external_temperature_release()
             self.async_on_remove(
                 async_track_state_change_event(
                     self.hass, source, self._handle_external_temperature_source_change
@@ -169,17 +225,21 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
     @property
     def _external_temperature_source(self) -> str | None:
         """Return the configured source, treating a legacy blank as unset."""
-        source = self._device.options.get(CONF_EXTERNAL_TEMPERATURE_SOURCE)
+        source = self.coordinator.options.get(CONF_EXTERNAL_TEMPERATURE_SOURCE)
         return source if isinstance(source, str) and source else None
 
-    def _external_temperature_from_source_state(self, state: State | None) -> float | None:
+    def _external_temperature_from_source_state(
+        self, state: State | None
+    ) -> float | None:
         """Convert a usable source state to the quarter-degree protocol grid."""
         if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return None
         try:
             value = TemperatureConverter.convert(
                 float(state.state),
-                state.attributes.get(ATTR_UNIT_OF_MEASUREMENT, UnitOfTemperature.CELSIUS),
+                state.attributes.get(
+                    ATTR_UNIT_OF_MEASUREMENT, UnitOfTemperature.CELSIUS
+                ),
                 UnitOfTemperature.CELSIUS,
             )
         except (TypeError, ValueError):
@@ -206,10 +266,13 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
             return None
         return value
 
-    def _set_external_temperature_override(self, temperature: float | None) -> None:
+    def _set_external_temperature_override(
+        self, temperature: float | None, *, from_source: bool = False
+    ) -> None:
         """Arm an override and immediately publish its integration-side state."""
         self._external_temperature_override = temperature
-        self._device.set_external_temperature_override(temperature)
+        self._external_temperature_from_source = from_source and temperature is not None
+        self.coordinator.set_external_temperature_override(temperature)
         self._apply_state()
         self.async_write_ha_state()
 
@@ -218,7 +281,7 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
         temperature = self._external_temperature_from_source_state(state)
         if temperature == self._external_temperature_override:
             return
-        self._set_external_temperature_override(temperature)
+        self._set_external_temperature_override(temperature, from_source=True)
 
     @callback
     def _handle_external_temperature_source_change(
@@ -227,7 +290,9 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
         """Keep the override tied to the source's availability and value."""
         self._set_external_temperature_from_source_state(event.data["new_state"])
 
-    def _restore_external_temperature_override(self, stored: ExtraStoredData | None) -> None:
+    def _restore_external_temperature_override(
+        self, stored: ExtraStoredData | None
+    ) -> None:
         """Re-arm the override recorded before the last restart or reload.
 
         Restoring only arms it integration-side - the unit is not told anything
@@ -249,6 +314,10 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
                 "Dropping the restored external temperature override: it came "
                 "from a source entity that is no longer configured"
             )
+            # Dropping it here only stops us sending it again. The unit was
+            # last told that value and holds it until a frame says otherwise,
+            # so the release has to be asked for.
+            self.coordinator.request_external_temperature_release()
             return
         try:
             value = float(restored)
@@ -272,21 +341,22 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
             )
             return
         self._external_temperature_override = value
-        self._device.set_external_temperature_override(value)
+        self.coordinator.set_external_temperature_override(value)
 
     @property
     def extra_restore_state_data(self) -> ExtraStoredData:
         """What async_added_to_hass() reads back after a restart or reload."""
         return ExternalTemperatureOverrideData(
             self._external_temperature_override,
-            self._external_temperature_source is not None,
+            self._external_temperature_from_source,
         )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose the armed override, so it is visible without calling the
-        action to find out. Display only - the value that survives a restart is
-        the one in extra_restore_state_data above.
+        """Expose the armed override, visible without calling the action.
+
+        Display only - the value that survives a restart is the one in
+        extra_restore_state_data above.
         """
         attrs = dict(super().extra_state_attributes or {})
         if self._external_temperature_override is not None:
@@ -296,19 +366,12 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
     def _min_temp_for_mode(self, hvac_mode: HVACMode) -> float:
         """Minimum setpoint depends on hvac_mode.
 
-        Per Mitsubishi Heavy Industries' official operable table ('21
-        SRK-T-324, models SRK60ZSX-W/A and SRK100ZR-W): indoor unit only
-        accepts 18-30C. Cooling reliably goes lower than that in practice
-        regardless of model, so that override applies unconditionally.
-        Models with the app's PresetTempRange2 capability (`ModelNoType`/
-        `TempItemType` in the app, see pywfrac's capabilities module) go further,
-        per the app's own table (Constants.java TempItemType.getMin/getMax):
-        Auto/Cool/Dry down to 16, Heat down to 10. That 10C heating floor is
-        unconfirmed on real hardware - the plain-setpoint reset to 18C after a
-        power cycle that's documented for the default range was only ever
-        observed on hardware without this capability.
+        The manufacturer's operable table ('21 SRK-T-324) gives 18-30C
+        throughout, but cooling goes lower on every model. PresetTempRange2
+        models go further per the app's own table: Auto/Cool/Dry to 16, Heat
+        to 10 - that heating floor is unconfirmed on hardware.
         """
-        if self._device.airco.Capabilities.preset_temp_range_2:
+        if self.coordinator.airco.Capabilities.preset_temp_range_2:
             if hvac_mode == HVACMode.HEAT:
                 return 10
             if hvac_mode in (HVACMode.COOL, HVACMode.DRY, HVACMode.AUTO):
@@ -316,23 +379,27 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
         return 16 if hvac_mode == HVACMode.COOL else 18
 
     def _max_temp_for_mode(self, hvac_mode: HVACMode) -> float:
-        """Maximum setpoint depends on hvac_mode for PresetTempRange2 models -
-        see _min_temp_for_mode."""
-        if self._device.airco.Capabilities.preset_temp_range_2 and hvac_mode in (
+        """Return the highest setpoint this hvac_mode allows.
+
+        Depends on hvac_mode for PresetTempRange2 models - see
+        _min_temp_for_mode.
+        """
+        if self.coordinator.airco.Capabilities.preset_temp_range_2 and hvac_mode in (
             HVACMode.COOL,
             HVACMode.DRY,
         ):
             return 33
         return 30
 
-    def _setpoint_range_for_mode(self, hvac_mode: HVACMode) -> tuple[float, float]:
-        """The range a setpoint is held to, for display and before sending.
+    def _setpoint_range_for_mode(
+        self, hvac_mode: HVACMode | None
+    ) -> tuple[float, float]:
+        """The range a setpoint is held to before it is sent.
 
-        A regulating mode is held to its own range. Off and fan-only have none:
-        the value applies to whichever regulating mode is turned on next, often
-        in the very next step of the same automation. Holding it to the default
-        18C floor there rejects a cooling setpoint the unit takes happily once
-        it is cooling.
+        A regulating mode is held to its own range; off, fan-only and an
+        unreadable mode get the union, since the value applies to whichever
+        mode comes next. The union is where the advertised range starts too,
+        because climate validates against it before this entity sees hvac_mode.
         """
         if hvac_mode in REGULATING_HVAC_MODES:
             return (
@@ -392,21 +459,57 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
         ]
         return min(low for low, _ in shifted), max(high for _, high in shifted)
 
+    def _advertised_range(self) -> tuple[float, float]:
+        """The range HA validates against, and the one the slider offers.
+
+        Wider than that union wherever the away preset is offered: Home Leave
+        runs at 31C cooling and 10C heating, which the unit reports back as
+        its target temperature. They stay reachable through the preset alone -
+        a setpoint sent by hand is still held to its mode's range. Both carry
+        that mode's target offset, since that is the number the card shows.
+        """
+        min_temp, max_temp = self._displayed_setpoint_range(None)
+        if self._attr_preset_modes:
+            return (
+                min(
+                    min_temp,
+                    HOME_LEAVE_TEMP_HEAT + self._resolve_target_offset(HVACMode.HEAT),
+                ),
+                max(
+                    max_temp,
+                    HOME_LEAVE_TEMP_COOL + self._resolve_target_offset(HVACMode.COOL),
+                ),
+            )
+        return (min_temp, max_temp)
+
     @property
     def min_temp(self) -> float:
-        return self._displayed_setpoint_range(self._attr_hvac_mode)[0]
+        """Return the lowest setpoint any of this unit's modes allows."""
+        return self._advertised_range()[0]
 
     @property
     def max_temp(self) -> float:
-        return self._displayed_setpoint_range(self._attr_hvac_mode)[1]
+        """Return the highest setpoint any of this unit's modes allows."""
+        return self._advertised_range()[1]
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""
         set_temp = kwargs[ATTR_TEMPERATURE]
-        # If this call also switches hvac_mode, the minimum must reflect the mode
-        # being switched to, not the (still stale until the next poll) current one.
-        target_hvac_mode = kwargs.get("hvac_mode", self._attr_hvac_mode)
-        target_hvac_mode = HVACMode.OFF if target_hvac_mode is None else target_hvac_mode
+
+        # The service schema coerces hvac_mode to the enum without checking
+        # it against the modes this entity offers.
+        requested_hvac_mode: HVACMode | None = kwargs.get(ATTR_HVAC_MODE)
+        if requested_hvac_mode is not None:
+            self._valid_mode_or_raise("hvac", requested_hvac_mode, self.hvac_modes)
+
+        target_hvac_mode = (
+            requested_hvac_mode
+            if requested_hvac_mode is not None
+            else self._attr_hvac_mode
+        )
+        target_hvac_mode = (
+            HVACMode.OFF if target_hvac_mode is None else target_hvac_mode
+        )
         min_temp, max_temp = self._displayed_setpoint_range(target_hvac_mode)
 
         # Naming the mode is the whole message: the range depends on it, and
@@ -453,33 +556,43 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
         )
         target_temp = max(device_low, min(device_high, target_temp))
 
-        opts: dict[AirconCommands, Any] = {AirconCommands.PresetTemp: target_temp}
+        # Home Assistant validates the advertised range but not the step, so a
+        # value between two halves arrives here intact - and the frame would
+        # truncate it, turning 21.4 into 21.0 rather than the 21.5 it is
+        # nearer to. Rounded rather than refused: the unit cannot hold it
+        # either way, and an automation that has always sent tenths should not
+        # start failing over it.
+        opts: dict[AirconCommands, Any] = {
+            AirconCommands.PresetTemp: round(target_temp * 2) / 2
+        }
 
-        if "hvac_mode" in kwargs:
+        if requested_hvac_mode is not None:
             opts.update(
                 {
-                    AirconCommands.OperationMode: self._device.airco.OperationMode
+                    AirconCommands.OperationMode: self.coordinator.airco.OperationMode
                     if target_hvac_mode == HVACMode.OFF
                     else HVAC_TRANSLATION[target_hvac_mode],
                     AirconCommands.Operation: target_hvac_mode != HVACMode.OFF,
                 }
             )
 
-        await self._device.async_queue_command(opts)
+        await self.coordinator.async_queue_command(opts)
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set new target fan mode."""
-        await self._device.async_queue_command({AirconCommands.AirFlow: FAN_MODE_TRANSLATION[fan_mode]})
+        await self.coordinator.async_queue_command(
+            {AirconCommands.AirFlow: FAN_MODE_TRANSLATION[fan_mode]}
+        )
 
     async def async_turn_on(self) -> None:
         """Turn the entity on."""
-        await self._device.async_queue_command({AirconCommands.Operation: True})
+        await self.coordinator.async_queue_command({AirconCommands.Operation: True})
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set new target hvac mode."""
-        await self._device.async_queue_command(
+        await self.coordinator.async_queue_command(
             {
-                AirconCommands.OperationMode: self._device.airco.OperationMode
+                AirconCommands.OperationMode: self.coordinator.airco.OperationMode
                 if hvac_mode == HVACMode.OFF
                 else HVAC_TRANSLATION[hvac_mode],
                 AirconCommands.Operation: hvac_mode != HVACMode.OFF,
@@ -490,45 +603,55 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
         """Set new target swing operation."""
         _swing_auto = swing_mode == SWING_3D_AUTO
         if _swing_auto:
-            await self._device.async_queue_command(
+            await self.coordinator.async_queue_command(
                 {
                     AirconCommands.Entrust: _swing_auto,
                 }
             )
         else:
-            await self._device.async_queue_command(
+            await self.coordinator.async_queue_command(
                 {
                     AirconCommands.WindDirectionUD: SWING_MODE_TRANSLATION[swing_mode],
                     AirconCommands.Entrust: False,
                 }
             )
 
-    async def async_set_swing_horizontal_mode(self, swing_mode: str) -> None:
+    async def async_set_swing_horizontal_mode(self, swing_horizontal_mode: str) -> None:
         """Set new target horizontal swing operation."""
+        swing_mode = swing_horizontal_mode
         _swing_auto = swing_mode == SWING_3D_AUTO
         if _swing_auto:
-            await self._device.async_queue_command(
+            await self.coordinator.async_queue_command(
                 {
                     AirconCommands.Entrust: _swing_auto,
                 }
             )
         else:
-            await self._device.async_queue_command(
+            await self.coordinator.async_queue_command(
                 {
-                    AirconCommands.WindDirectionLR: SWING_HORIZONTAL_MODE_TRANSLATION[swing_mode],
+                    AirconCommands.WindDirectionLR: SWING_HORIZONTAL_MODE_TRANSLATION[
+                        swing_mode
+                    ],
                     AirconCommands.Entrust: False,
                 }
             )
 
-    async def async_set_external_temperature(self, temperature: float | None = None) -> None:
-        """Arm an external room temperature override, or revert to the unit's
-        internal sensor. The valid range is enforced by the service schema.
+    async def async_set_external_temperature(
+        self, temperature: float | None = None
+    ) -> None:
+        """Arm an external room temperature override, or revert to the sensor.
+
+        Reverting means the unit's own internal sensor; the valid range of an
+        armed value is enforced by the service schema.
 
         Arming only: nothing is sent from here. The value rides along on the
         next frame that goes out anyway - the operation-data request once a
         cycle, or any command in between - and the same is true of clearing
         it, since a frame without an override carries 0xFF and puts the unit
-        back on its own sensor.
+        back on its own sensor. Clearing keeps the carrier up until such a
+        frame has gone out (Device.set_external_temperature_override): the
+        unit holds the last value it was given, so dropping the carrier the
+        moment the override goes would leave nothing to tell it otherwise.
 
         A command frame of this action's own would cost more than the wait.
         Byte 5 has no set-bit, so it cannot be written on its own: the frame
@@ -541,7 +664,7 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
         The frame it rides on is the operation-data request, which the
         coordinator starts asking for while an override is armed - the
         override subscribes to a segment itself, exactly like an enabled
-        diagnostic sensor does (see Device._sync_external_temperature_carrier).
+        diagnostic sensor does (see ExternalTemperatureFeed._sync_carrier).
         """
         if temperature is not None and self._external_temperature_source is not None:
             # Two writers would make the service result immediately temporary
@@ -554,16 +677,15 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
 
     async def async_turn_off(self) -> None:
         """Turn the entity off."""
-        await self._device.async_queue_command({AirconCommands.Operation: False})
+        await self.coordinator.async_queue_command({AirconCommands.Operation: False})
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Enter or leave the unit's Home Leave mode.
 
-        The unit has no single "away" command: it enters the mode when it is
-        given the away target of the direction it is running in, which is why
-        the current hvac_mode decides between them. A unit in auto, dry or
-        fan-only has no such target to send, so the direction has to be named
-        through HomeLeaveModeSelect instead of guessed at here.
+        The unit has no single "away" command: it enters the mode on the away
+        target of the direction it is running in, so the current hvac_mode
+        decides. Auto, dry and fan-only have no such target - name the
+        direction through HomeLeaveModeSelect instead.
         """
         if preset_mode == PRESET_NONE:
             # Offset-corrected like every other setpoint: NORMAL_TEMP is what
@@ -580,7 +702,7 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
                 self._writing_mode(self._attr_hvac_mode)
             )
             normal_temp = NORMAL_TEMP - self._offset_for_target(self._attr_hvac_mode)
-            await self._device.async_queue_command(
+            await self.coordinator.async_queue_command(
                 {AirconCommands.PresetTemp: max(low, min(high, normal_temp))}
             )
             return
@@ -596,7 +718,7 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
                 translation_placeholders={"hvac_mode": str(self._attr_hvac_mode)},
             )
 
-        await self._device.async_queue_command(
+        await self.coordinator.async_queue_command(
             {
                 AirconCommands.Operation: True,
                 AirconCommands.OperationMode: HVAC_TRANSLATION[self._attr_hvac_mode],
@@ -605,17 +727,19 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
         )
 
     def _require_home_leave_mode_capability(self) -> None:
-        if not self._device.airco.Capabilities.home_leave_mode:
+        if not self.coordinator.airco.Capabilities.home_leave_mode:
             raise ServiceValidationError(
                 translation_domain=DOMAIN,
                 translation_key="home_leave_mode_not_supported",
             )
 
     async def async_request_home_leave_mode_status(self) -> None:
-        """See Device.async_request_home_leave_mode_status - verified live
-        against the official app's own display."""
+        """See Device.async_request_home_leave_mode_status.
+
+        Verified live against the official app's own display.
+        """
         self._require_home_leave_mode_capability()
-        await self._device.async_request_home_leave_mode_status()
+        await self.coordinator.async_request_home_leave_mode_status()
 
     async def async_set_home_leave_mode(
         self,
@@ -628,7 +752,7 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
     ) -> None:
         """See Device.async_set_home_leave_mode - verified live."""
         self._require_home_leave_mode_capability()
-        await self._device.async_set_home_leave_mode(
+        await self.coordinator.async_set_home_leave_mode(
             HomeLeaveModeSetting(
                 TempRule=temp_rule_cooling,
                 TempSetting=temp_setting_cooling,
@@ -656,11 +780,11 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
         self._attr_preset_mode = None
 
     def _update_state(self) -> None:
-        """Private update attributes"""
-        airco = self._device.airco
+        """Private update attributes."""
+        airco = self.coordinator.airco
 
         # Apply indoor offset
-        indoor_offset = self._device.options.get(CONF_INDOOR_OFFSET, 0.0)
+        indoor_offset = self.coordinator.options.get(CONF_INDOOR_OFFSET, 0.0)
         # Both the displayed hvac_mode and the target_offset resolution need
         # the underlying cool/heat mode, so it's computed once here and shared
         # between them.
@@ -674,19 +798,19 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
         # While the unit is regulating on a temperature someone supplied, that
         # value is the room and the card shows it - see
         # Device.external_temperature_room_value. What the unit reports back
-        # is its own rendering of what it was handed, which is why the Indoor
-        # Temperature sensor (still verbatim) and the card disagree exactly
-        # then and only then.
+        # is what it was handed, overshoot correction included, which is why
+        # the Indoor Temperature sensor (still verbatim) and the card disagree
+        # exactly then and only then - by the correction.
         # Otherwise the reading is the unit's, plus the calibration offset -
         # which is suspended while an override is in effect, because it
         # corrects the unit's own return-air sensor and that sensor is out of
         # the loop just then.
-        room = self._device.external_temperature_room_value
+        room = self.coordinator.external_temperature_room_value
         if room is not None:
             self._attr_current_temperature = room
         else:
             self._attr_current_temperature = airco.IndoorTemp + (
-                0.0 if self._device.external_temperature_applied else indoor_offset
+                0.0 if self.coordinator.external_temperature_applied else indoor_offset
             )
         # Named rather than left to index past the end of the list: the library
         # says so itself when it could not read the unit's fan step, and a sixth
@@ -703,9 +827,7 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
         self._attr_swing_horizontal_mode = (
             SWING_3D_AUTO
             if airco.Entrust
-            else list(
-                SWING_HORIZONTAL_MODE_TRANSLATION.keys()
-            )[airco.WindDirectionLR]
+            else list(SWING_HORIZONTAL_MODE_TRANSLATION.keys())[airco.WindDirectionLR]
         )
         self._attr_hvac_mode = mode_from_operation
 
@@ -724,17 +846,10 @@ class AircoClimate(WfRacEntity, ClimateEntity, RestoreEntity):
     def _determine_hvac_action(self, airco: Aircon) -> HVACAction:
         """Determine the current HVAC action from operation mode and state.
 
-        CoolHotJudge reflects what the unit's own AUTO logic is doing. Mind
-        the inversion: the parser reads it as (content[8] & 8) == 0, so the
-        raw bit set means COOLING and the resulting flag is then False -
-        a true CoolHotJudge is HEATING. CompressorRunning (content[9] & 2)
-        distinguishes "unit on" from "compressor actually running" (e.g.
-        setpoint satisfied), same signal as the Compressor binary sensor -
-        used here so COOL/HEAT/AUTO can report IDLE instead of claiming to
-        cool/heat while the compressor is stopped.
-
-        Only called while the unit is on, and only with an OperationMode of
-        0-4: anything else has already raised in _hvac_mode_from_operation.
+        CoolHotJudge reflects the unit's own AUTO logic and is inverted - the
+        parser reads (content[8] & 8) == 0, so a true CoolHotJudge is HEATING.
+        CompressorRunning separates "on" from "running", so a satisfied
+        setpoint reports IDLE.
         """
         _mode = airco.OperationMode
 

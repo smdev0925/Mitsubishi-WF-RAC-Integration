@@ -7,20 +7,20 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from homeassistant import config_entries
-from homeassistant.const import CONF_DEVICE_ID, CONF_HOST, CONF_PORT
-from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType, InvalidData, section
-from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pywfrac.repository import WfRacError
 
 from custom_components import mitsubishi_wf_rac
+from custom_components.mitsubishi_wf_rac.config_flow import (
+    SECTION_INDOOR_TEMPERATURE_SOURCE,
+    SECTION_SENSOR_OFFSETS,
+    SECTION_SETPOINT_OFFSETS,
+)
 from custom_components.mitsubishi_wf_rac.const import (
     CONF_AIRCO_ID,
     CONF_AVAILABILITY_RETRY_LIMIT,
-    CONF_FIRMWARE_UPDATE_CHECK,
     CONF_EXTERNAL_TEMPERATURE_SOURCE,
+    CONF_FIRMWARE_UPDATE_CHECK,
     CONF_INDOOR_OFFSET,
     CONF_OPERATOR_ID,
     CONF_OUTDOOR_OFFSET,
@@ -32,12 +32,12 @@ from custom_components.mitsubishi_wf_rac.const import (
     CONF_TARGET_OFFSET_HEAT,
     DOMAIN,
 )
-from custom_components.mitsubishi_wf_rac.config_flow import (
-    SECTION_INDOOR_TEMPERATURE_SOURCE,
-    SECTION_SENSOR_OFFSETS,
-    SECTION_SETPOINT_OFFSETS,
-)
-from pywfrac.repository import WfRacError
+from homeassistant import config_entries
+from homeassistant.const import CONF_DEVICE_ID, CONF_HOST, CONF_PORT
+from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType, InvalidData, section
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 
 def _mock_repository(airco_id="airco-1", update_result=0):
@@ -48,7 +48,9 @@ def _mock_repository(airco_id="airco-1", update_result=0):
 
 
 def _patch_repository(repo):
-    return patch("custom_components.mitsubishi_wf_rac.config_flow.Repository", return_value=repo)
+    return patch(
+        "custom_components.mitsubishi_wf_rac.config_flow.Repository", return_value=repo
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +59,9 @@ def bypass_entry_setup():
     connection - CREATE_ENTRY normally triggers a real async_setup_entry(),
     which would open a real network connection via Device.update().
     """
-    with patch("custom_components.mitsubishi_wf_rac.async_setup_entry", return_value=True):
+    with patch(
+        "custom_components.mitsubishi_wf_rac.async_setup_entry", return_value=True
+    ):
         yield
 
 
@@ -134,7 +138,9 @@ async def test_user_flow_host_already_configured_shows_error(hass: HomeAssistant
     assert result["errors"] == {"host": "host_already_configured"}
 
 
-async def test_user_flow_force_update_bypasses_duplicate_host_check(hass: HomeAssistant):
+async def test_user_flow_force_update_bypasses_duplicate_host_check(
+    hass: HomeAssistant,
+):
     MockConfigEntry(
         domain=DOMAIN,
         data={"name": "Existing AC", "host": "192.168.1.50"},
@@ -183,7 +189,9 @@ async def test_user_flow_empty_airco_id_is_cannot_connect(hass: HomeAssistant):
     assert result["errors"] == {"base": "cannot_connect"}
 
 
-async def test_user_flow_update_account_info_falsy_is_cannot_connect(hass: HomeAssistant):
+async def test_user_flow_update_account_info_falsy_is_cannot_connect(
+    hass: HomeAssistant,
+):
     repo = _mock_repository()
     repo.update_account_info.return_value = None
     with _patch_repository(repo):
@@ -292,7 +300,9 @@ async def test_user_flow_unexpected_exception_shows_generic_error(hass: HomeAssi
     assert result["errors"] == {"base": "unexpected_error"}
 
 
-async def test_user_flow_reuses_operator_and_device_id_from_existing_entry(hass: HomeAssistant):
+async def test_user_flow_reuses_operator_and_device_id_from_existing_entry(
+    hass: HomeAssistant,
+):
     MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -342,14 +352,17 @@ def _existing_entry(
 
 
 async def test_reconfigure_flow_shows_form_with_current_values(hass: HomeAssistant):
-    entry = _existing_entry(hass, name="Living Room AC", host="192.168.1.50", port=51443)
+    entry = _existing_entry(
+        hass, name="Living Room AC", host="192.168.1.50", port=51443
+    )
 
     result = await entry.start_reconfigure_flow(hass)
 
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "reconfigure"
     suggested = {
-        key.schema: key.description["suggested_value"] for key in result["data_schema"].schema
+        key.schema: key.description["suggested_value"]
+        for key in result["data_schema"].schema
     }
     assert suggested == {"host": "192.168.1.50", "port": 51443}
 
@@ -479,7 +492,9 @@ async def test_zeroconf_discovery_shows_confirm_form(hass: HomeAssistant):
     assert result["step_id"] == "discovery_confirm"
 
 
-async def test_zeroconf_discovery_aborts_if_host_already_configured(hass: HomeAssistant):
+async def test_zeroconf_discovery_aborts_if_host_already_configured(
+    hass: HomeAssistant,
+):
     MockConfigEntry(
         domain=DOMAIN,
         data={"name": "Existing AC", "host": "192.168.1.50"},
@@ -646,7 +661,10 @@ async def test_options_flow_saves_submitted_values(hass: HomeAssistant):
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_TARGET_OFFSET] == 0.5
-    assert result["data"][CONF_EXTERNAL_TEMPERATURE_SOURCE] == "sensor.living_room_temperature"
+    assert (
+        result["data"][CONF_EXTERNAL_TEMPERATURE_SOURCE]
+        == "sensor.living_room_temperature"
+    )
     # The host is connection data now, so it is not in the options at all and
     # an options save cannot touch it.
     assert "host" not in result["data"]
@@ -655,9 +673,9 @@ async def test_options_flow_saves_submitted_values(hass: HomeAssistant):
 async def test_options_flow_refuses_its_own_entity_as_source(hass: HomeAssistant):
     # An armed override makes the unit report the injected value back, so this
     # integration's own temperature sensors follow it. Feeding one back in
-    # would walk the override away from the room half a kelvin per poll, so
-    # the selector excludes them - and rejects one on submit, not just in the
-    # picker.
+    # would feed the override into itself - and with an overshoot set, walk it
+    # away from the room by that much per poll - so the selector excludes them,
+    # and rejects one on submit, not just in the picker.
     import voluptuous as vol
 
     entry = MockConfigEntry(
@@ -702,11 +720,13 @@ async def test_options_flow_accepts_a_foreign_temperature_sensor(hass: HomeAssis
     )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_EXTERNAL_TEMPERATURE_SOURCE] == "sensor.hallway_temperature"
+    assert (
+        result["data"][CONF_EXTERNAL_TEMPERATURE_SOURCE] == "sensor.hallway_temperature"
+    )
 
 
 @pytest.mark.parametrize(
-    "key,value",
+    ("key", "value"),
     [
         (CONF_INDOOR_OFFSET, 100.0),  # outside -15..15
         (CONF_OUTDOOR_OFFSET, -100.0),  # outside -15..15
@@ -754,9 +774,12 @@ async def test_options_flow_rejects_a_retry_limit_below_the_floor(hass: HomeAssi
     with pytest.raises(vol.MultipleInvalid):
         schema(_form_input({CONF_AVAILABILITY_RETRY_LIMIT: 1}))
 
-    assert schema(_form_input({CONF_AVAILABILITY_RETRY_LIMIT: 5}))[
-        CONF_AVAILABILITY_RETRY_LIMIT
-    ] == 5
+    assert (
+        schema(_form_input({CONF_AVAILABILITY_RETRY_LIMIT: 5}))[
+            CONF_AVAILABILITY_RETRY_LIMIT
+        ]
+        == 5
+    )
 
 
 async def test_options_flow_defaults_firmware_update_check_to_off(hass: HomeAssistant):
@@ -847,7 +870,9 @@ async def test_options_flow_accepts_a_signed_overshoot(hass: HomeAssistant, valu
     assert result["data"][CONF_OVERSHOOT_COOL] == value
 
 
-async def test_options_flow_leaves_per_mode_offsets_unset_when_omitted(hass: HomeAssistant):
+async def test_options_flow_leaves_per_mode_offsets_unset_when_omitted(
+    hass: HomeAssistant,
+):
     # CONF_TARGET_OFFSET_COOL/_HEAT must persist as genuinely absent (None
     # via .get()) when left blank, not coerced to 0.0 - that's what makes
     # the climate.py resolver's fallback to CONF_TARGET_OFFSET work. A
@@ -873,7 +898,9 @@ async def test_options_flow_leaves_per_mode_offsets_unset_when_omitted(hass: Hom
     assert result["data"].get(CONF_TARGET_OFFSET_HEAT) is None
 
 
-async def test_options_flow_only_offers_the_overshoots_with_a_source(hass: HomeAssistant):
+async def test_options_flow_only_offers_the_overshoots_with_a_source(
+    hass: HomeAssistant,
+):
     """They bend the room temperature handed to the unit, so without a source
     there is nothing for them to act on and they would sit there doing
     nothing.
@@ -919,9 +946,9 @@ async def test_options_flow_only_offers_the_overshoots_with_a_source(hass: HomeA
 async def test_options_flow_opens_the_cooling_overshoot_on_the_measured_figure(
     hass: HomeAssistant,
 ):
-    """Four units land 0.6-1.3 K past the setting, so a fresh field opening on
-    0 opens on a number that is certainly wrong. It is a pre-fill: a stored
-    value wins, and nothing is corrected until the form is saved.
+    """Four units stop about half a kelvin past the setting, so a fresh field
+    opening on 0 opens on a number that is certainly wrong. It is a pre-fill:
+    a stored value wins, and nothing is corrected until the form is saved.
     """
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -935,12 +962,11 @@ async def test_options_flow_opens_the_cooling_overshoot_on_the_measured_figure(
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     validated = result["data_schema"](_form_input())[SECTION_INDOOR_TEMPERATURE_SOURCE]
-    assert validated[CONF_OVERSHOOT_COOL] == 1.0
+    assert validated[CONF_OVERSHOOT_COOL] == 0.5
     # Heating has looked symmetric wherever it was measured - no figure to offer.
     assert validated[CONF_OVERSHOOT_HEAT] == 0.0
-    # Dry opens on 0 for the opposite reason to heating: not a figure that
-    # turned out to be zero, but a mode nobody has measured (#218). A guess
-    # pre-filled here would move real regulation on the strength of one.
+    # Dry opens on 0 as a measured figure: the one unit measured there needed
+    # nothing beyond the scale correction pywfrac now applies (#218).
     assert validated[CONF_OVERSHOOT_DRY] == 0.0
     # Nothing is applied by opening the form: the resolver still reads 0.
     assert entry.options.get(CONF_OVERSHOOT_COOL) is None
@@ -977,7 +1003,7 @@ async def test_options_flow_saves_a_dry_overshoot(hass: HomeAssistant):
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_OVERSHOOT_DRY] == 0.75
     # The cooling field is untouched by it: separate figures, separate modes.
-    assert result["data"][CONF_OVERSHOOT_COOL] == 1.0
+    assert result["data"][CONF_OVERSHOOT_COOL] == 0.5
 
 
 async def test_options_flow_keeps_values_it_never_showed(hass: HomeAssistant):
@@ -1093,7 +1119,9 @@ def test_is_matching_without_unique_id_never_matches():
     assert flow_a.is_matching(flow_b) is False
 
 
-async def test_a_rediscovery_refreshes_the_address_but_not_the_port(hass: HomeAssistant):
+async def test_a_rediscovery_refreshes_the_address_but_not_the_port(
+    hass: HomeAssistant,
+):
     """A configured entry's port is not the announcement's to change.
 
     Modules have been seen announcing 5353 - the mDNS port itself - in the
