@@ -4,49 +4,47 @@ blueprint:
   homeassistant:
     min_version: "2024.12.0"
   description: >-
-    **Version 2.1.0** — 10 October 2026
+    **Version 3.0.0** — 10 October 2026
 
 
-    Sets the fan speed and the two vanes when a unit changes mode. Choose the
-    values for each mode. **No change** leaves that setting as it is.
+    Sets the fan speed and air direction whenever a unit changes mode. Open
+    each mode below and pick what you want. Anything left on **No change** is
+    left alone.
 
 
-    Each group has its own settings. To give a unit its own settings, put it in
-    a group alone. Units that share settings can share a group. Put each unit
-    in one group only.
+    You can add more than one unit if they should all behave the same way. For
+    a unit that needs different settings, create another automation from this
+    blueprint.
 
 
-    It runs only when the mode changes. A change you make by hand stays until
-    the next mode change. A unit that comes back from unavailable is not
-    changed.
+    It only acts when the mode changes. If you adjust the fan or direction
+    yourself afterwards, your change sticks until the next mode change.
 
 
-    **3D auto** has its own switch for each mode. When it is on, the unit moves
-    both vanes itself and the vane settings for that mode are not used. A unit
-    without 3D auto uses the vane settings. To end 3D auto, choose a vane
-    position.
-
-
-    It does not change a mode, so you can use it with the AUTO replacement and
-    the resolver.
+    It never changes the mode itself, so it is fine to run alongside the AUTO
+    replacement or the lockout resolver.
   domain: automation
   input:
-    group_1:
-      name: Group 1
+    units:
+      name: Units
       icon: mdi:hvac
-      collapsed: false
       input:
-        group_1_units:
+        climate_entities:
           name: Units
-          default: []
+          description: Every unit you pick here gets the same settings.
           selector:
             entity:
               multiple: true
               filter:
                 - integration: mitsubishi_wf_rac
                   domain: climate
-        group_1_cool_fan:
-          name: Cool fan speed
+    cool:
+      name: Cooling
+      icon: mdi:snowflake
+      collapsed: true
+      input:
+        cool_fan:
+          name: Fan speed
           default: keep
           selector: &fan
             select:
@@ -57,26 +55,40 @@ blueprint:
                 - { label: Low, value: low }
                 - { label: Medium, value: medium }
                 - { label: High, value: high }
-        group_1_cool_swing:
-          name: Cool vertical vane
+        cool_3d:
+          name: 3D auto
+          description: &three_d >-
+            The unit steers the air up, down, left and right by itself. While
+            this is on, the two direction settings below are ignored. Leaving it
+            off does not switch 3D auto off on the unit — pick a direction below
+            to do that. Units without 3D auto use the directions below instead.
+          default: false
+          selector: &toggle
+            boolean: {}
+        cool_swing:
+          name: Up/down direction
+          description: &swing_help Ignored when 3D auto is on.
           default: keep
           selector: &swing
             select:
               options:
                 - { label: No change, value: keep }
-                - { label: Up/down auto, value: up_down_auto }
+                - { label: Swing up and down, value: up_down_auto }
                 - { label: Highest, value: highest }
                 - { label: Middle, value: middle }
                 - { label: Normal, value: normal }
                 - { label: Lowest, value: lowest }
-        group_1_cool_horizontal:
-          name: Cool horizontal vane
+        cool_horizontal:
+          name: Left/right direction
+          description: &horizontal_help >-
+            Ignored when 3D auto is on. Skipped on units that cannot direct air
+            left and right.
           default: keep
           selector: &horizontal
             select:
               options:
                 - { label: No change, value: keep }
-                - { label: Left/right auto, value: left_right_auto }
+                - { label: Swing left and right, value: left_right_auto }
                 - { label: Left-left, value: left_left }
                 - { label: Left-center, value: left_center }
                 - { label: Center-center, value: center_center }
@@ -84,274 +96,71 @@ blueprint:
                 - { label: Right-right, value: right_right }
                 - { label: Left-right, value: left_right }
                 - { label: Right-left, value: right_left }
-        group_1_cool_3d: { name: Cool 3D auto, default: false, selector: { boolean: {} } }
-        group_1_heat_fan: { name: Heat fan speed, default: keep, selector: *fan }
-        group_1_heat_swing: { name: Heat vertical vane, default: keep, selector: *swing }
-        group_1_heat_horizontal: { name: Heat horizontal vane, default: keep, selector: *horizontal }
-        group_1_heat_3d: { name: Heat 3D auto, default: false, selector: { boolean: {} } }
-        group_1_dry_fan: { name: Dry fan speed, default: keep, selector: *fan }
-        group_1_dry_swing: { name: Dry vertical vane, default: keep, selector: *swing }
-        group_1_dry_horizontal: { name: Dry horizontal vane, default: keep, selector: *horizontal }
-        group_1_dry_3d: { name: Dry 3D auto, default: false, selector: { boolean: {} } }
-        group_1_fan_only_fan: { name: Fan only fan speed, default: keep, selector: *fan }
-        group_1_fan_only_swing: { name: Fan only vertical vane, default: keep, selector: *swing }
-        group_1_fan_only_horizontal: { name: Fan only horizontal vane, default: keep, selector: *horizontal }
-        group_1_fan_only_3d: { name: Fan only 3D auto, default: false, selector: { boolean: {} } }
-        group_1_auto_fan: { name: Auto fan speed, default: keep, selector: *fan }
-        group_1_auto_swing: { name: Auto vertical vane, default: keep, selector: *swing }
-        group_1_auto_horizontal: { name: Auto horizontal vane, default: keep, selector: *horizontal }
-        group_1_auto_3d: { name: Auto 3D auto, default: false, selector: { boolean: {} } }
-    group_2:
-      name: Group 2
-      icon: mdi:hvac
+    heat:
+      name: Heating
+      icon: mdi:fire
       collapsed: true
       input:
-        group_2_units:
-          name: Units
-          default: []
-          selector:
-            entity:
-              multiple: true
-              filter:
-                - integration: mitsubishi_wf_rac
-                  domain: climate
-        group_2_cool_fan: { name: Cool fan speed, default: keep, selector: *fan }
-        group_2_cool_swing: { name: Cool vertical vane, default: keep, selector: *swing }
-        group_2_cool_horizontal: { name: Cool horizontal vane, default: keep, selector: *horizontal }
-        group_2_cool_3d: { name: Cool 3D auto, default: false, selector: { boolean: {} } }
-        group_2_heat_fan: { name: Heat fan speed, default: keep, selector: *fan }
-        group_2_heat_swing: { name: Heat vertical vane, default: keep, selector: *swing }
-        group_2_heat_horizontal: { name: Heat horizontal vane, default: keep, selector: *horizontal }
-        group_2_heat_3d: { name: Heat 3D auto, default: false, selector: { boolean: {} } }
-        group_2_dry_fan: { name: Dry fan speed, default: keep, selector: *fan }
-        group_2_dry_swing: { name: Dry vertical vane, default: keep, selector: *swing }
-        group_2_dry_horizontal: { name: Dry horizontal vane, default: keep, selector: *horizontal }
-        group_2_dry_3d: { name: Dry 3D auto, default: false, selector: { boolean: {} } }
-        group_2_fan_only_fan: { name: Fan only fan speed, default: keep, selector: *fan }
-        group_2_fan_only_swing: { name: Fan only vertical vane, default: keep, selector: *swing }
-        group_2_fan_only_horizontal: { name: Fan only horizontal vane, default: keep, selector: *horizontal }
-        group_2_fan_only_3d: { name: Fan only 3D auto, default: false, selector: { boolean: {} } }
-        group_2_auto_fan: { name: Auto fan speed, default: keep, selector: *fan }
-        group_2_auto_swing: { name: Auto vertical vane, default: keep, selector: *swing }
-        group_2_auto_horizontal: { name: Auto horizontal vane, default: keep, selector: *horizontal }
-        group_2_auto_3d: { name: Auto 3D auto, default: false, selector: { boolean: {} } }
-    group_3:
-      name: Group 3
-      icon: mdi:hvac
+        heat_fan: { name: Fan speed, default: keep, selector: *fan }
+        heat_3d: { name: 3D auto, description: *three_d, default: false, selector: *toggle }
+        heat_swing: { name: Up/down direction, description: *swing_help, default: keep, selector: *swing }
+        heat_horizontal: { name: Left/right direction, description: *horizontal_help, default: keep, selector: *horizontal }
+    dry:
+      name: Dry
+      icon: mdi:water-percent
       collapsed: true
       input:
-        group_3_units:
-          name: Units
-          default: []
-          selector:
-            entity:
-              multiple: true
-              filter:
-                - integration: mitsubishi_wf_rac
-                  domain: climate
-        group_3_cool_fan: { name: Cool fan speed, default: keep, selector: *fan }
-        group_3_cool_swing: { name: Cool vertical vane, default: keep, selector: *swing }
-        group_3_cool_horizontal: { name: Cool horizontal vane, default: keep, selector: *horizontal }
-        group_3_cool_3d: { name: Cool 3D auto, default: false, selector: { boolean: {} } }
-        group_3_heat_fan: { name: Heat fan speed, default: keep, selector: *fan }
-        group_3_heat_swing: { name: Heat vertical vane, default: keep, selector: *swing }
-        group_3_heat_horizontal: { name: Heat horizontal vane, default: keep, selector: *horizontal }
-        group_3_heat_3d: { name: Heat 3D auto, default: false, selector: { boolean: {} } }
-        group_3_dry_fan: { name: Dry fan speed, default: keep, selector: *fan }
-        group_3_dry_swing: { name: Dry vertical vane, default: keep, selector: *swing }
-        group_3_dry_horizontal: { name: Dry horizontal vane, default: keep, selector: *horizontal }
-        group_3_dry_3d: { name: Dry 3D auto, default: false, selector: { boolean: {} } }
-        group_3_fan_only_fan: { name: Fan only fan speed, default: keep, selector: *fan }
-        group_3_fan_only_swing: { name: Fan only vertical vane, default: keep, selector: *swing }
-        group_3_fan_only_horizontal: { name: Fan only horizontal vane, default: keep, selector: *horizontal }
-        group_3_fan_only_3d: { name: Fan only 3D auto, default: false, selector: { boolean: {} } }
-        group_3_auto_fan: { name: Auto fan speed, default: keep, selector: *fan }
-        group_3_auto_swing: { name: Auto vertical vane, default: keep, selector: *swing }
-        group_3_auto_horizontal: { name: Auto horizontal vane, default: keep, selector: *horizontal }
-        group_3_auto_3d: { name: Auto 3D auto, default: false, selector: { boolean: {} } }
-    group_4:
-      name: Group 4
-      icon: mdi:hvac
+        dry_fan: { name: Fan speed, default: keep, selector: *fan }
+        dry_3d: { name: 3D auto, description: *three_d, default: false, selector: *toggle }
+        dry_swing: { name: Up/down direction, description: *swing_help, default: keep, selector: *swing }
+        dry_horizontal: { name: Left/right direction, description: *horizontal_help, default: keep, selector: *horizontal }
+    fan_only:
+      name: Fan only
+      icon: mdi:fan
       collapsed: true
       input:
-        group_4_units:
-          name: Units
-          default: []
-          selector:
-            entity:
-              multiple: true
-              filter:
-                - integration: mitsubishi_wf_rac
-                  domain: climate
-        group_4_cool_fan: { name: Cool fan speed, default: keep, selector: *fan }
-        group_4_cool_swing: { name: Cool vertical vane, default: keep, selector: *swing }
-        group_4_cool_horizontal: { name: Cool horizontal vane, default: keep, selector: *horizontal }
-        group_4_cool_3d: { name: Cool 3D auto, default: false, selector: { boolean: {} } }
-        group_4_heat_fan: { name: Heat fan speed, default: keep, selector: *fan }
-        group_4_heat_swing: { name: Heat vertical vane, default: keep, selector: *swing }
-        group_4_heat_horizontal: { name: Heat horizontal vane, default: keep, selector: *horizontal }
-        group_4_heat_3d: { name: Heat 3D auto, default: false, selector: { boolean: {} } }
-        group_4_dry_fan: { name: Dry fan speed, default: keep, selector: *fan }
-        group_4_dry_swing: { name: Dry vertical vane, default: keep, selector: *swing }
-        group_4_dry_horizontal: { name: Dry horizontal vane, default: keep, selector: *horizontal }
-        group_4_dry_3d: { name: Dry 3D auto, default: false, selector: { boolean: {} } }
-        group_4_fan_only_fan: { name: Fan only fan speed, default: keep, selector: *fan }
-        group_4_fan_only_swing: { name: Fan only vertical vane, default: keep, selector: *swing }
-        group_4_fan_only_horizontal: { name: Fan only horizontal vane, default: keep, selector: *horizontal }
-        group_4_fan_only_3d: { name: Fan only 3D auto, default: false, selector: { boolean: {} } }
-        group_4_auto_fan: { name: Auto fan speed, default: keep, selector: *fan }
-        group_4_auto_swing: { name: Auto vertical vane, default: keep, selector: *swing }
-        group_4_auto_horizontal: { name: Auto horizontal vane, default: keep, selector: *horizontal }
-        group_4_auto_3d: { name: Auto 3D auto, default: false, selector: { boolean: {} } }
-    group_5:
-      name: Group 5
-      icon: mdi:hvac
+        fan_only_fan: { name: Fan speed, default: keep, selector: *fan }
+        fan_only_3d: { name: 3D auto, description: *three_d, default: false, selector: *toggle }
+        fan_only_swing: { name: Up/down direction, description: *swing_help, default: keep, selector: *swing }
+        fan_only_horizontal: { name: Left/right direction, description: *horizontal_help, default: keep, selector: *horizontal }
+    auto:
+      name: Auto
+      icon: mdi:thermostat-auto
       collapsed: true
       input:
-        group_5_units:
-          name: Units
-          default: []
-          selector:
-            entity:
-              multiple: true
-              filter:
-                - integration: mitsubishi_wf_rac
-                  domain: climate
-        group_5_cool_fan: { name: Cool fan speed, default: keep, selector: *fan }
-        group_5_cool_swing: { name: Cool vertical vane, default: keep, selector: *swing }
-        group_5_cool_horizontal: { name: Cool horizontal vane, default: keep, selector: *horizontal }
-        group_5_cool_3d: { name: Cool 3D auto, default: false, selector: { boolean: {} } }
-        group_5_heat_fan: { name: Heat fan speed, default: keep, selector: *fan }
-        group_5_heat_swing: { name: Heat vertical vane, default: keep, selector: *swing }
-        group_5_heat_horizontal: { name: Heat horizontal vane, default: keep, selector: *horizontal }
-        group_5_heat_3d: { name: Heat 3D auto, default: false, selector: { boolean: {} } }
-        group_5_dry_fan: { name: Dry fan speed, default: keep, selector: *fan }
-        group_5_dry_swing: { name: Dry vertical vane, default: keep, selector: *swing }
-        group_5_dry_horizontal: { name: Dry horizontal vane, default: keep, selector: *horizontal }
-        group_5_dry_3d: { name: Dry 3D auto, default: false, selector: { boolean: {} } }
-        group_5_fan_only_fan: { name: Fan only fan speed, default: keep, selector: *fan }
-        group_5_fan_only_swing: { name: Fan only vertical vane, default: keep, selector: *swing }
-        group_5_fan_only_horizontal: { name: Fan only horizontal vane, default: keep, selector: *horizontal }
-        group_5_fan_only_3d: { name: Fan only 3D auto, default: false, selector: { boolean: {} } }
-        group_5_auto_fan: { name: Auto fan speed, default: keep, selector: *fan }
-        group_5_auto_swing: { name: Auto vertical vane, default: keep, selector: *swing }
-        group_5_auto_horizontal: { name: Auto horizontal vane, default: keep, selector: *horizontal }
-        group_5_auto_3d: { name: Auto 3D auto, default: false, selector: { boolean: {} } }
-    group_6:
-      name: Group 6
-      icon: mdi:hvac
-      collapsed: true
-      input:
-        group_6_units:
-          name: Units
-          default: []
-          selector:
-            entity:
-              multiple: true
-              filter:
-                - integration: mitsubishi_wf_rac
-                  domain: climate
-        group_6_cool_fan: { name: Cool fan speed, default: keep, selector: *fan }
-        group_6_cool_swing: { name: Cool vertical vane, default: keep, selector: *swing }
-        group_6_cool_horizontal: { name: Cool horizontal vane, default: keep, selector: *horizontal }
-        group_6_cool_3d: { name: Cool 3D auto, default: false, selector: { boolean: {} } }
-        group_6_heat_fan: { name: Heat fan speed, default: keep, selector: *fan }
-        group_6_heat_swing: { name: Heat vertical vane, default: keep, selector: *swing }
-        group_6_heat_horizontal: { name: Heat horizontal vane, default: keep, selector: *horizontal }
-        group_6_heat_3d: { name: Heat 3D auto, default: false, selector: { boolean: {} } }
-        group_6_dry_fan: { name: Dry fan speed, default: keep, selector: *fan }
-        group_6_dry_swing: { name: Dry vertical vane, default: keep, selector: *swing }
-        group_6_dry_horizontal: { name: Dry horizontal vane, default: keep, selector: *horizontal }
-        group_6_dry_3d: { name: Dry 3D auto, default: false, selector: { boolean: {} } }
-        group_6_fan_only_fan: { name: Fan only fan speed, default: keep, selector: *fan }
-        group_6_fan_only_swing: { name: Fan only vertical vane, default: keep, selector: *swing }
-        group_6_fan_only_horizontal: { name: Fan only horizontal vane, default: keep, selector: *horizontal }
-        group_6_fan_only_3d: { name: Fan only 3D auto, default: false, selector: { boolean: {} } }
-        group_6_auto_fan: { name: Auto fan speed, default: keep, selector: *fan }
-        group_6_auto_swing: { name: Auto vertical vane, default: keep, selector: *swing }
-        group_6_auto_horizontal: { name: Auto horizontal vane, default: keep, selector: *horizontal }
-        group_6_auto_3d: { name: Auto 3D auto, default: false, selector: { boolean: {} } }
+        auto_fan: { name: Fan speed, default: keep, selector: *fan }
+        auto_3d: { name: 3D auto, description: *three_d, default: false, selector: *toggle }
+        auto_swing: { name: Up/down direction, description: *swing_help, default: keep, selector: *swing }
+        auto_horizontal: { name: Left/right direction, description: *horizontal_help, default: keep, selector: *horizontal }
 
 # Runs in turn, so the last mode change of a unit is the one that stays.
 mode: queued
 max: 25
 
 # A mode change only. Not from unavailable: the hourly reconnect would
-# otherwise undo every change made by hand. The trigger id is the group.
+# otherwise undo every change made by hand.
 triggers:
   - trigger: state
-    id: "1"
-    entity_id: !input group_1_units
-    not_from: [unavailable, unknown]
-    to: [cool, heat, dry, fan_only, auto]
-  - trigger: state
-    id: "2"
-    entity_id: !input group_2_units
-    not_from: [unavailable, unknown]
-    to: [cool, heat, dry, fan_only, auto]
-  - trigger: state
-    id: "3"
-    entity_id: !input group_3_units
-    not_from: [unavailable, unknown]
-    to: [cool, heat, dry, fan_only, auto]
-  - trigger: state
-    id: "4"
-    entity_id: !input group_4_units
-    not_from: [unavailable, unknown]
-    to: [cool, heat, dry, fan_only, auto]
-  - trigger: state
-    id: "5"
-    entity_id: !input group_5_units
-    not_from: [unavailable, unknown]
-    to: [cool, heat, dry, fan_only, auto]
-  - trigger: state
-    id: "6"
-    entity_id: !input group_6_units
+    entity_id: !input climate_entities
     not_from: [unavailable, unknown]
     to: [cool, heat, dry, fan_only, auto]
 
 variables:
   unit: "{{ trigger.entity_id }}"
-  hvac: "{{ trigger.to_state.state }}"
-  # One entry per group, in group order: mode -> [fan, vertical, horizontal, 3D].
-  groups:
-    - cool: [!input group_1_cool_fan, !input group_1_cool_swing, !input group_1_cool_horizontal, !input group_1_cool_3d]
-      heat: [!input group_1_heat_fan, !input group_1_heat_swing, !input group_1_heat_horizontal, !input group_1_heat_3d]
-      dry: [!input group_1_dry_fan, !input group_1_dry_swing, !input group_1_dry_horizontal, !input group_1_dry_3d]
-      fan_only: [!input group_1_fan_only_fan, !input group_1_fan_only_swing, !input group_1_fan_only_horizontal, !input group_1_fan_only_3d]
-      auto: [!input group_1_auto_fan, !input group_1_auto_swing, !input group_1_auto_horizontal, !input group_1_auto_3d]
-    - cool: [!input group_2_cool_fan, !input group_2_cool_swing, !input group_2_cool_horizontal, !input group_2_cool_3d]
-      heat: [!input group_2_heat_fan, !input group_2_heat_swing, !input group_2_heat_horizontal, !input group_2_heat_3d]
-      dry: [!input group_2_dry_fan, !input group_2_dry_swing, !input group_2_dry_horizontal, !input group_2_dry_3d]
-      fan_only: [!input group_2_fan_only_fan, !input group_2_fan_only_swing, !input group_2_fan_only_horizontal, !input group_2_fan_only_3d]
-      auto: [!input group_2_auto_fan, !input group_2_auto_swing, !input group_2_auto_horizontal, !input group_2_auto_3d]
-    - cool: [!input group_3_cool_fan, !input group_3_cool_swing, !input group_3_cool_horizontal, !input group_3_cool_3d]
-      heat: [!input group_3_heat_fan, !input group_3_heat_swing, !input group_3_heat_horizontal, !input group_3_heat_3d]
-      dry: [!input group_3_dry_fan, !input group_3_dry_swing, !input group_3_dry_horizontal, !input group_3_dry_3d]
-      fan_only: [!input group_3_fan_only_fan, !input group_3_fan_only_swing, !input group_3_fan_only_horizontal, !input group_3_fan_only_3d]
-      auto: [!input group_3_auto_fan, !input group_3_auto_swing, !input group_3_auto_horizontal, !input group_3_auto_3d]
-    - cool: [!input group_4_cool_fan, !input group_4_cool_swing, !input group_4_cool_horizontal, !input group_4_cool_3d]
-      heat: [!input group_4_heat_fan, !input group_4_heat_swing, !input group_4_heat_horizontal, !input group_4_heat_3d]
-      dry: [!input group_4_dry_fan, !input group_4_dry_swing, !input group_4_dry_horizontal, !input group_4_dry_3d]
-      fan_only: [!input group_4_fan_only_fan, !input group_4_fan_only_swing, !input group_4_fan_only_horizontal, !input group_4_fan_only_3d]
-      auto: [!input group_4_auto_fan, !input group_4_auto_swing, !input group_4_auto_horizontal, !input group_4_auto_3d]
-    - cool: [!input group_5_cool_fan, !input group_5_cool_swing, !input group_5_cool_horizontal, !input group_5_cool_3d]
-      heat: [!input group_5_heat_fan, !input group_5_heat_swing, !input group_5_heat_horizontal, !input group_5_heat_3d]
-      dry: [!input group_5_dry_fan, !input group_5_dry_swing, !input group_5_dry_horizontal, !input group_5_dry_3d]
-      fan_only: [!input group_5_fan_only_fan, !input group_5_fan_only_swing, !input group_5_fan_only_horizontal, !input group_5_fan_only_3d]
-      auto: [!input group_5_auto_fan, !input group_5_auto_swing, !input group_5_auto_horizontal, !input group_5_auto_3d]
-    - cool: [!input group_6_cool_fan, !input group_6_cool_swing, !input group_6_cool_horizontal, !input group_6_cool_3d]
-      heat: [!input group_6_heat_fan, !input group_6_heat_swing, !input group_6_heat_horizontal, !input group_6_heat_3d]
-      dry: [!input group_6_dry_fan, !input group_6_dry_swing, !input group_6_dry_horizontal, !input group_6_dry_3d]
-      fan_only: [!input group_6_fan_only_fan, !input group_6_fan_only_swing, !input group_6_fan_only_horizontal, !input group_6_fan_only_3d]
-      auto: [!input group_6_auto_fan, !input group_6_auto_swing, !input group_6_auto_horizontal, !input group_6_auto_3d]
-  settings: "{{ groups[trigger.id | int - 1][hvac] }}"
-  fan: "{{ settings[0] }}"
+  # mode -> [fan, up/down, left/right, 3D auto]
+  settings:
+    cool: [!input cool_fan, !input cool_swing, !input cool_horizontal, !input cool_3d]
+    heat: [!input heat_fan, !input heat_swing, !input heat_horizontal, !input heat_3d]
+    dry: [!input dry_fan, !input dry_swing, !input dry_horizontal, !input dry_3d]
+    fan_only: [!input fan_only_fan, !input fan_only_swing, !input fan_only_horizontal, !input fan_only_3d]
+    auto: [!input auto_fan, !input auto_swing, !input auto_horizontal, !input auto_3d]
+  chosen: "{{ settings[trigger.to_state.state] }}"
+  fan: "{{ chosen[0] }}"
   # 3D auto is one flag for both vanes, and a vane position clears it. So when
   # it is on, it replaces both vane settings - if the unit has it.
-  three_d: "{{ settings[3] and '3d_auto' in (state_attr(unit, 'swing_modes') or []) }}"
-  swing: "{{ '3d_auto' if three_d else settings[1] }}"
-  horizontal: "{{ 'keep' if three_d else settings[2] }}"
+  three_d: "{{ chosen[3] and '3d_auto' in (state_attr(unit, 'swing_modes') or []) }}"
+  swing: "{{ '3d_auto' if three_d else chosen[1] }}"
+  horizontal: "{{ 'keep' if three_d else chosen[2] }}"
 
 # A setting is sent if the unit lists the value. 'keep' is in no list, and a
 # unit with no horizontal vane has none. Sent even if the unit reads it as set
